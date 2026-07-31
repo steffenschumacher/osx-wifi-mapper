@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osx-wifi-mapper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Native CoreWLAN Wi-Fi site surveys on an interactive floor plan"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Steffen Schumacher" }]
 dependencies = [
+  "numpy>=1.26,<3",
   "pandas>=2.0,<3",
   "pillow>=10,<12",
   "plotly>=5.20,<7",

@@ -1,7 +1,7 @@
 """macOS Wi-Fi Site Survey.
 
 Install and run on macOS:
-    python3 -m pip install streamlit plotly pandas pillow \
+    python3 -m pip install streamlit plotly pandas numpy pillow \
         streamlit-plotly-events pyobjc-framework-CoreWLAN
     streamlit run wifi_site_survey.py
 
@@ -13,11 +13,14 @@ BSSIDs are hidden from the scan results.
 from __future__ import annotations
 
 import hashlib
+import html
 import io
 import platform
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -31,9 +34,33 @@ MEASUREMENT_COLUMNS = [
     "measured_at_utc",
     "ssid",
     "bssid",
+    "band",
     "rssi_dbm",
     "channel",
 ]
+
+TRIPLE_COLUMNS = ["ssid", "bssid", "band"]
+MIN_HEATMAP_SAMPLES = 10
+RSSI_MIN = -90
+RSSI_MAX = -40
+RSSI_COLORSCALE = [
+    [0.0, "#ef4444"],
+    [0.30, "#ef4444"],  # -75 dBm
+    [0.50, "#facc15"],  # -65 dBm
+    [0.60, "#facc15"],  # -60 dBm
+    [0.80, "#22c55e"],
+    [1.0, "#22c55e"],
+]
+Triple = tuple[str, str, str]
+
+
+def normalize_band(value: Any) -> str:
+    """Normalize CoreWLAN's CWChannelBand enum to a stable display value."""
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        numeric = None
+    return {1: "2.4 GHz", 2: "5 GHz", 3: "6 GHz"}.get(numeric, "Unknown")
 
 
 def scan_wifi() -> list[dict[str, Any]]:
@@ -69,10 +96,15 @@ def scan_wifi() -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for net in networks or []:
         channel = net.wlanChannel()
+        try:
+            band = normalize_band(channel.channelBand()) if channel else "Unknown"
+        except (AttributeError, TypeError, ValueError):
+            band = "Unknown"
         results.append(
             {
                 "ssid": str(net.ssid()) if net.ssid() is not None else "<hidden>",
                 "bssid": (str(net.bssid()).upper() if net.bssid() is not None else "<unavailable>"),
+                "band": band,
                 "rssi_dbm": int(net.rssiValue()),
                 "channel": int(channel.channelNumber()) if channel else None,
             }
@@ -110,6 +142,17 @@ def add_measurement_point(x: float, y: float) -> tuple[int, int]:
     return point_id, len(readings)
 
 
+def delete_measurement_point(point_id: int) -> None:
+    """Delete a point and all of its AP readings from session state."""
+    st.session_state.points = [
+        point for point in st.session_state.points if point["point_id"] != point_id
+    ]
+    st.session_state.measurements = [
+        row for row in st.session_state.measurements if row["point_id"] != point_id
+    ]
+    st.session_state.map_revision += 1
+
+
 def rssi_color(rssi: float) -> str:
     if rssi > -60:
         return "#22c55e"  # green
@@ -118,11 +161,211 @@ def rssi_color(rssi: float) -> str:
     return "#ef4444"  # red
 
 
+def measurement_frame(rows: Iterable[dict[str, Any]]) -> pd.DataFrame:
+    """Create a stable export/filter frame, including compatibility for old session rows."""
+    frame = pd.DataFrame(rows)
+    for column in MEASUREMENT_COLUMNS:
+        if column not in frame:
+            frame[column] = pd.Series(dtype="object")
+    frame["band"] = frame["band"].fillna("Unknown")
+    return frame[MEASUREMENT_COLUMNS]
+
+
+def _has_spatial_spread(coordinates: np.ndarray) -> bool:
+    """Return whether coordinates span a genuine two-dimensional area."""
+    if len(coordinates) < 3:
+        return False
+    centered = coordinates - coordinates.mean(axis=0)
+    singular_values = np.linalg.svd(centered, compute_uv=False)
+    return bool(
+        len(singular_values) >= 2
+        and singular_values[0] > 1e-8
+        and singular_values[1] / singular_values[0] >= 0.02
+    )
+
+
+def triple_eligibility(measurements: pd.DataFrame) -> pd.DataFrame:
+    """Describe heatmap eligibility for every observed SSID/BSSID/band triple."""
+    columns = [*TRIPLE_COLUMNS, "sample_count", "eligible", "reason"]
+    if measurements.empty:
+        return pd.DataFrame(columns=columns)
+
+    records: list[dict[str, Any]] = []
+    for triple, group in measurements.groupby(TRIPLE_COLUMNS, dropna=False, sort=True):
+        unique_points = group[["x", "y"]].drop_duplicates()
+        sample_count = len(unique_points)
+        spatially_valid = _has_spatial_spread(unique_points.to_numpy(dtype=float))
+        if sample_count < MIN_HEATMAP_SAMPLES:
+            reason = f"{sample_count}/{MIN_HEATMAP_SAMPLES} points"
+        elif not spatially_valid:
+            reason = "insufficient spatial spread"
+        else:
+            reason = "Ready"
+        records.append(
+            {
+                **dict(zip(TRIPLE_COLUMNS, triple, strict=True)),
+                "sample_count": sample_count,
+                "eligible": sample_count >= MIN_HEATMAP_SAMPLES and spatially_valid,
+                "reason": reason,
+            }
+        )
+    return pd.DataFrame(records, columns=columns)
+
+
+def select_eligible_triples(
+    eligibility: pd.DataFrame,
+    ssids: list[str],
+    bssids: list[str],
+    bands: list[str],
+) -> list[Triple]:
+    """Return eligible triples matching all three cascading filter selections."""
+    if eligibility.empty or not ssids or not bssids or not bands:
+        return []
+    selected = eligibility[
+        eligibility["eligible"]
+        & eligibility["ssid"].isin(ssids)
+        & eligibility["bssid"].isin(bssids)
+        & eligibility["band"].isin(bands)
+    ]
+    return [tuple(row) for row in selected[TRIPLE_COLUMNS].itertuples(index=False, name=None)]
+
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    """Return the convex hull vertices in counter-clockwise order."""
+    unique = sorted({(float(x), float(y)) for x, y in points})
+    if len(unique) < 3:
+        return np.asarray(unique, dtype=float)
+
+    def cross(origin: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        return (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=float)
+
+
+def _inside_convex_polygon(grid_x: np.ndarray, grid_y: np.ndarray, hull: np.ndarray) -> np.ndarray:
+    """Vectorized inclusive point-in-convex-polygon test for a grid."""
+    if len(hull) < 3:
+        return np.zeros_like(grid_x, dtype=bool)
+    inside = np.ones_like(grid_x, dtype=bool)
+    for start, end in zip(hull, np.roll(hull, -1, axis=0), strict=True):
+        cross = (end[0] - start[0]) * (grid_y - start[1]) - (end[1] - start[1]) * (
+            grid_x - start[0]
+        )
+        inside &= cross >= -1e-9
+    return inside
+
+
+def interpolate_rssi(
+    coordinates: np.ndarray,
+    values: np.ndarray,
+    grid_axis: np.ndarray,
+    power: float = 2.0,
+) -> np.ndarray:
+    """Interpolate RSSI with IDW and mask cells outside the sampled convex hull."""
+    coordinates = np.asarray(coordinates, dtype=float)
+    values = np.asarray(values, dtype=float)
+    grid_x, grid_y = np.meshgrid(grid_axis, grid_axis)
+    if not _has_spatial_spread(coordinates):
+        return np.full_like(grid_x, np.nan, dtype=float)
+
+    dx = grid_x[..., None] - coordinates[:, 0]
+    dy = grid_y[..., None] - coordinates[:, 1]
+    distance_squared = dx * dx + dy * dy
+    exact = distance_squared <= 1e-12
+    safe_distance = np.maximum(distance_squared, 1e-12)
+    weights = 1.0 / np.power(safe_distance, power / 2.0)
+    surface = np.sum(weights * values, axis=2) / np.sum(weights, axis=2)
+    if exact.any():
+        exact_cells = exact.any(axis=2)
+        exact_indices = exact.argmax(axis=2)
+        surface[exact_cells] = values[exact_indices[exact_cells]]
+
+    hull = _convex_hull(coordinates)
+    surface[~_inside_convex_polygon(grid_x, grid_y, hull)] = np.nan
+    return surface
+
+
+def combine_surfaces(surfaces: list[np.ndarray]) -> np.ndarray | None:
+    """Combine selected triple surfaces using strongest (maximum) RSSI per cell."""
+    if not surfaces:
+        return None
+    stacked = np.stack(surfaces)
+    valid = np.isfinite(stacked)
+    strongest = np.max(np.where(valid, stacked, -np.inf), axis=0)
+    strongest[~valid.any(axis=0)] = np.nan
+    return strongest
+
+
+def heatmap_surface(
+    measurements: pd.DataFrame,
+    selected_triples: list[Triple],
+    resolution: int = 101,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Interpolate eligible triples independently and combine them by strongest RSSI."""
+    grid_axis = np.linspace(0.0, 100.0, resolution)
+    surfaces: list[np.ndarray] = []
+    for ssid, bssid, band in selected_triples:
+        group = measurements[
+            (measurements["ssid"] == ssid)
+            & (measurements["bssid"] == bssid)
+            & (measurements["band"] == band)
+        ]
+        samples = group.groupby(["x", "y"], as_index=False).agg(rssi_dbm=("rssi_dbm", "max"))
+        coordinates = samples[["x", "y"]].to_numpy(dtype=float)
+        if len(coordinates) < MIN_HEATMAP_SAMPLES or not _has_spatial_spread(coordinates):
+            continue
+        surfaces.append(
+            interpolate_rssi(coordinates, samples["rssi_dbm"].to_numpy(dtype=float), grid_axis)
+        )
+    return grid_axis, combine_surfaces(surfaces)
+
+
+def format_hover_readings(group: pd.DataFrame) -> str:
+    """Format every AP reading at a point for Plotly marker hover text."""
+    if group.empty:
+        return "No access points captured"
+    ordered = group.sort_values(["ssid", "bssid", "band", "channel"], na_position="last")
+    readings = []
+    for row in ordered.itertuples():
+        channel = "Unknown" if pd.isna(row.channel) else str(int(row.channel))
+        ssid = html.escape(str(row.ssid))
+        bssid = html.escape(str(row.bssid))
+        band = html.escape(str(row.band))
+        readings.append(f"{ssid} / {bssid} / {band} / channel {channel}: {int(row.rssi_dbm)} dBm")
+    return "<br>".join(readings)
+
+
+def marker_frame(points: pd.DataFrame, measurements: pd.DataFrame) -> pd.DataFrame:
+    """Build one marker per measured coordinate with all readings in hover text."""
+    if points.empty:
+        return pd.DataFrame(columns=["point_id", "x", "y", "hover"])
+    result = points[["point_id", "x", "y"]].copy()
+    grouped = {point_id: group for point_id, group in measurements.groupby("point_id")}
+    result["hover"] = [
+        format_hover_readings(grouped.get(point_id, pd.DataFrame()))
+        for point_id in result["point_id"]
+    ]
+    return result
+
+
 def build_map(
     image: Image.Image,
-    visible_points: pd.DataFrame,
+    markers: pd.DataFrame,
+    grid_axis: np.ndarray | None = None,
+    surface: np.ndarray | None = None,
+    heatmap_opacity: float = 0.55,
 ) -> go.Figure:
-    """Build the floor-plan map; the transparent heatmap captures background clicks."""
+    """Build the clickable floor-plan, RSSI overlay, and sample markers."""
     figure = go.Figure()
     figure.add_layout_image(
         source=image,
@@ -152,24 +395,40 @@ def build_map(
         )
     )
 
-    if not visible_points.empty:
+    if surface is not None and grid_axis is not None:
+        figure.add_trace(
+            go.Heatmap(
+                x=grid_axis,
+                y=grid_axis,
+                z=surface,
+                zmin=RSSI_MIN,
+                zmax=RSSI_MAX,
+                colorscale=RSSI_COLORSCALE,
+                opacity=heatmap_opacity,
+                colorbar={"title": {"text": "RSSI<br>dBm"}},
+                hovertemplate="RSSI=%{z:.1f} dBm<extra></extra>",
+                name="Strongest selected signal",
+            )
+        )
+
+    if not markers.empty:
         figure.add_trace(
             go.Scatter(
-                x=visible_points["x"],
-                y=visible_points["y"],
+                x=markers["x"],
+                y=markers["y"],
                 mode="markers",
                 marker={
-                    "size": 16,
-                    "color": [rssi_color(value) for value in visible_points["rssi_dbm"]],
+                    "size": 14,
+                    "symbol": "diamond",
+                    "color": "#2563eb",
                     "line": {"color": "white", "width": 2},
                 },
-                customdata=visible_points[["point_id", "rssi_dbm", "access_points"]],
+                customdata=markers[["point_id", "hover"]],
                 hovertemplate=(
                     "Point %{customdata[0]}<br>x=%{x:.1f}, y=%{y:.1f}"
-                    "<br>RSSI=%{customdata[1]:.1f} dBm"
-                    "<br>Selected APs=%{customdata[2]}<extra></extra>"
+                    "<br>%{customdata[1]}<extra></extra>"
                 ),
-                name="Measurements",
+                name="Sample points",
             )
         )
 
@@ -190,29 +449,6 @@ def build_map(
         },
     )
     return figure
-
-
-def selected_point_summary(
-    measurements: pd.DataFrame,
-    selected_ssids: list[str],
-    selected_bssids: list[str],
-    aggregation: str,
-) -> pd.DataFrame:
-    if measurements.empty or not selected_ssids or not selected_bssids:
-        return pd.DataFrame(columns=["point_id", "x", "y", "rssi_dbm", "access_points"])
-
-    filtered = measurements[
-        measurements["ssid"].isin(selected_ssids) & measurements["bssid"].isin(selected_bssids)
-    ]
-    if filtered.empty:
-        return pd.DataFrame(columns=["point_id", "x", "y", "rssi_dbm", "access_points"])
-
-    grouped = filtered.groupby(["point_id", "x", "y"], as_index=False)
-    summary = grouped.agg(
-        rssi_dbm=("rssi_dbm", "mean" if aggregation == "Average" else "max"),
-        access_points=("bssid", "nunique"),
-    )
-    return summary
 
 
 def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
@@ -241,38 +477,51 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         st.error(f"Could not read the floor plan: {exc}")
         return
 
-    measurements = pd.DataFrame(st.session_state.measurements, columns=MEASUREMENT_COLUMNS)
-    all_ssids = sorted(measurements["ssid"].dropna().unique().tolist())
+    measurements = measurement_frame(st.session_state.measurements)
+    points = pd.DataFrame(st.session_state.points)
+    eligibility = triple_eligibility(measurements)
+    eligible = eligibility[eligibility["eligible"]]
     with st.sidebar:
-        st.header("Signal filters")
-        if measurements.empty:
-            # Avoid creating empty persistent widgets before the first scan; once
-            # data exists, Streamlit will correctly initialize every AP as active.
-            st.caption("Filters become available after the first measurement.")
+        st.header("Heatmap filters")
+        if eligible.empty:
+            st.caption(f"A network needs {MIN_HEATMAP_SAMPLES} spatially spread samples.")
             selected_ssids: list[str] = []
             selected_bssids: list[str] = []
+            selected_bands: list[str] = []
         else:
-            selected_ssids = st.multiselect("SSID", all_ssids, default=all_ssids)
-            eligible_bssids = sorted(
-                measurements.loc[measurements["ssid"].isin(selected_ssids), "bssid"]
-                .dropna()
-                .unique()
-                .tolist()
+            selected_ssids = st.multiselect("SSID", sorted(eligible["ssid"].unique()))
+            bssid_options = sorted(
+                eligible.loc[eligible["ssid"].isin(selected_ssids), "bssid"].unique()
             )
-            selected_bssids = st.multiselect("BSSID", eligible_bssids, default=eligible_bssids)
-        aggregation = st.radio(
-            "Multiple selected APs at one point",
-            ["Strongest", "Average"],
-            horizontal=True,
-        )
+            selected_bssids = st.multiselect("BSSID", bssid_options)
+            band_options = sorted(
+                eligible.loc[
+                    eligible["ssid"].isin(selected_ssids) & eligible["bssid"].isin(selected_bssids),
+                    "band",
+                ].unique()
+            )
+            selected_bands = st.multiselect("Band", band_options)
+        heatmap_opacity = st.slider("Heatmap opacity", 0.1, 0.9, 0.55, 0.05)
         st.markdown(
-            "**Signal colors**  \n🟢 above −60 dBm  \n🟡 −60 through −75 dBm  \n🔴 below −75 dBm"
+            "**Fixed RSSI scale**  \n🟢 strong  \n🟡 intermediate  \n🔴 weak  \n"
+            "Range: −90 to −40 dBm"
         )
+        ineligible = eligibility[~eligibility["eligible"]]
+        if not ineligible.empty:
+            with st.expander("Networks not ready for heatmaps"):
+                for row in ineligible.itertuples():
+                    st.caption(f"{row.ssid} / {row.bssid} / {row.band} — {row.reason}")
 
-    visible_points = selected_point_summary(
-        measurements, selected_ssids, selected_bssids, aggregation
+    selected_triples = select_eligible_triples(
+        eligibility, selected_ssids, selected_bssids, selected_bands
     )
-    figure = build_map(floorplan, visible_points)
+    grid_axis, surface = heatmap_surface(measurements, selected_triples)
+    markers = marker_frame(points, measurements)
+    if eligible.empty:
+        st.info(f"Collect at least {MIN_HEATMAP_SAMPLES} spatially spread samples for a network.")
+    elif not selected_triples:
+        st.info("Select an eligible SSID, BSSID, and band to display its heatmap.")
+    figure = build_map(floorplan, markers, grid_axis, surface, heatmap_opacity)
     clicks = plotly_events(
         figure,
         click_event=True,
@@ -295,7 +544,6 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
             st.error(str(exc))
 
     st.subheader("Manage Points")
-    points = pd.DataFrame(st.session_state.points)
     if points.empty:
         st.caption("No measurement points yet.")
     else:
@@ -308,17 +556,11 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         chosen = st.selectbox("Point to delete", labels.keys())
         if st.button("Delete selected point", type="secondary"):
             point_id = labels[chosen]
-            st.session_state.points = [
-                point for point in st.session_state.points if point["point_id"] != point_id
-            ]
-            st.session_state.measurements = [
-                row for row in st.session_state.measurements if row["point_id"] != point_id
-            ]
-            st.session_state.map_revision += 1
+            delete_measurement_point(point_id)
             st.rerun()
 
     st.subheader("Export")
-    export_frame = pd.DataFrame(st.session_state.measurements, columns=MEASUREMENT_COLUMNS)
+    export_frame = measurement_frame(st.session_state.measurements)
     st.download_button(
         "Download survey CSV",
         data=export_frame.to_csv(index=False).encode("utf-8"),

@@ -5,6 +5,21 @@ you are standing, and the app scans every visible access point through Apple's
 native CoreWLAN framework. Measurements can be filtered, visualized, removed,
 and exported as CSV.
 
+## RSSI heatmaps
+
+Every scan records SSID, BSSID, Wi-Fi band (2.4, 5, or 6 GHz), channel, and RSSI for each visible
+access point. The map always shows the measured coordinates as blue diamond markers; hover a
+marker to see every reading captured there.
+
+A specific `(SSID, BSSID, band)` combination becomes available in the heatmap filters after it
+has been observed at 10 distinct, spatially spread coordinates. Choose an eligible SSID, BSSID,
+and band in the sidebar to render a semi-transparent red–yellow–green RSSI surface. When several
+eligible combinations are selected, the map shows the strongest interpolated RSSI at each
+location. Missing scan results remain unknown rather than being treated as weak signals.
+
+Interpolation is limited to the surveyed area. It visualizes the samples you collected; it does
+not model walls, building materials, interference, or predict RF propagation in unsurveyed rooms.
+
 ## Install from a release
 
 Download the archive for your Mac from the latest GitHub release:
