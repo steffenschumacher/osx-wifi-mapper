@@ -1,0 +1,61 @@
+name: Release macOS binaries
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --locked
+      - name: Build single executable
+        run: >-
+          uv run pyinstaller --noconfirm --clean --onefile
+          --name wifi-site-survey
+          --add-data "wifi_site_survey.py:."
+          --collect-all streamlit
+          --collect-all streamlit_plotly_events
+          --hidden-import objc
+          --hidden-import CoreWLAN
+          wifi_site_survey_launcher.py
+      - name: Package executable and checksum
+        run: |
+          tar -C dist -czf "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" wifi-site-survey
+          shasum -a 256 "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" > "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wifi-site-survey-macos-${{ matrix.arch }}
+          path: |
+            wifi-site-survey-macos-${{ matrix.arch }}.tar.gz
+            wifi-site-survey-macos-${{ matrix.arch }}.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wifi-site-survey-macos-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release-assets/* --generate-notes --verify-tag
