@@ -248,6 +248,33 @@ def test_scan_rejects_non_macos(monkeypatch: pytest.MonkeyPatch) -> None:
         app.scan_wifi()
 
 
+@pytest.mark.parametrize("status", [3, 4])
+def test_authorized_location_status_allows_scans(status: int) -> None:
+    assert app.location_permission_error(status) is None
+
+
+@pytest.mark.parametrize("status", [None, 0, 1, 2])
+def test_missing_location_permission_has_actionable_error(status: int | None) -> None:
+    message = app.location_permission_error(status)
+
+    assert message is not None
+    assert "Location" in message or "location" in message
+
+
+def test_request_location_authorization_retains_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = types.SimpleNamespace(requestWhenInUseAuthorization=lambda: None)
+    requested = []
+    manager.requestWhenInUseAuthorization = lambda: requested.append(True)
+    monkeypatch.setattr(app, "location_authorization", lambda: (0, manager))
+    monkeypatch.delattr(app.sys, "frozen", raising=False)
+
+    status, returned_manager = app.request_location_authorization()
+
+    assert status == 0
+    assert returned_manager is manager
+    assert requested == [True]
+
+
 @pytest.mark.parametrize(
     ("raw_band", "expected"), [(1, "2.4 GHz"), (2, "5 GHz"), (3, "6 GHz"), (9, "Unknown")]
 )
@@ -291,6 +318,7 @@ def test_scan_extracts_corewlan_fields(
         app.CWWiFiClient = Client
 
     monkeypatch.setattr(app.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(app, "location_authorization", lambda: (4, None))
     monkeypatch.setitem(sys.modules, "objc", types.SimpleNamespace(loadBundle=load_bundle))
 
     assert app.scan_wifi() == [
@@ -302,3 +330,47 @@ def test_scan_extracts_corewlan_fields(
             "channel": 44,
         }
     ]
+
+
+def test_scan_rejects_fully_redacted_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Channel:
+        def channelNumber(self) -> int:
+            return 44
+
+        def channelBand(self) -> int:
+            return 2
+
+    class RedactedNetwork:
+        def ssid(self):
+            return None
+
+        def bssid(self):
+            return None
+
+        def rssiValue(self) -> int:
+            return -63
+
+        def wlanChannel(self) -> Channel:
+            return Channel()
+
+    class Interface:
+        def scanForNetworksWithName_error_(self, name: None, error: None):
+            return [RedactedNetwork()], None
+
+    class Client:
+        @staticmethod
+        def sharedWiFiClient() -> Client:
+            return Client()
+
+        def interface(self) -> Interface:
+            return Interface()
+
+    def load_bundle(*args, **kwargs) -> None:
+        app.CWWiFiClient = Client
+
+    monkeypatch.setattr(app.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(app, "location_authorization", lambda: (4, None))
+    monkeypatch.setitem(sys.modules, "objc", types.SimpleNamespace(loadBundle=load_bundle))
+
+    with pytest.raises(RuntimeError, match="redacted every SSID and BSSID"):
+        app.scan_wifi()

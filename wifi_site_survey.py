@@ -16,6 +16,7 @@ import hashlib
 import html
 import io
 import platform
+import sys
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -52,6 +53,62 @@ RSSI_COLORSCALE = [
     [1.0, "#22c55e"],
 ]
 Triple = tuple[str, str, str]
+LOCATION_AUTHORIZED = {3, 4}
+LOCATION_STATUS_NAMES = {
+    0: "Not requested",
+    1: "Restricted",
+    2: "Denied",
+    3: "Authorized",
+    4: "Authorized while in use",
+}
+
+
+def location_authorization() -> tuple[int | None, Any | None]:
+    """Return Core Location authorization and a retained manager on macOS."""
+    if platform.system() != "Darwin":
+        return None, None
+    try:
+        from objc import loadBundle
+
+        loadBundle(
+            "CoreLocation",
+            bundle_path="/System/Library/Frameworks/CoreLocation.framework",
+            module_globals=globals(),
+        )
+        manager = CLLocationManager.alloc().init()  # noqa: F821 - injected by loadBundle
+        return int(manager.authorizationStatus()), manager
+    except Exception:
+        return None, None
+
+
+def request_location_authorization() -> tuple[int | None, Any | None]:
+    """Bring a frozen app forward and request macOS Location Services access."""
+    status, manager = location_authorization()
+    if manager is None or status != 0:
+        return status, manager
+    if getattr(sys, "frozen", False):
+        try:
+            from AppKit import NSApplication
+
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        except ImportError:
+            pass
+    manager.requestWhenInUseAuthorization()
+    return status, manager
+
+
+def location_permission_error(status: int | None) -> str | None:
+    """Return actionable scan-blocking guidance for a location authorization state."""
+    if status in LOCATION_AUTHORIZED:
+        return None
+    if status == 0:
+        return "Location access has not been granted. Use 'Request Location Access' first."
+    if status in {1, 2}:
+        return (
+            "Location access is denied. Enable WiFi Site Survey (or your terminal when running "
+            "from source) in System Settings → Privacy & Security → Location Services."
+        )
+    return "Core Location authorization could not be checked; SSID and BSSID cannot be read safely."
 
 
 def normalize_band(value: Any) -> str:
@@ -67,6 +124,9 @@ def scan_wifi() -> list[dict[str, Any]]:
     """Perform one synchronous scan with Apple's native CoreWLAN framework."""
     if platform.system() != "Darwin":
         raise RuntimeError("Live Wi-Fi scanning is available only on macOS.")
+    permission_error = location_permission_error(location_authorization()[0])
+    if permission_error:
+        raise RuntimeError(permission_error)
 
     # Import lazily so the UI can still start and explain missing dependencies.
     try:
@@ -94,20 +154,30 @@ def scan_wifi() -> list[dict[str, Any]]:
         raise RuntimeError(f"CoreWLAN scan failed: {error}")
 
     results: list[dict[str, Any]] = []
+    redacted = 0
     for net in networks or []:
         channel = net.wlanChannel()
         try:
             band = normalize_band(channel.channelBand()) if channel else "Unknown"
         except (AttributeError, TypeError, ValueError):
             band = "Unknown"
+        ssid = str(net.ssid()) if net.ssid() is not None else "<hidden>"
+        bssid = str(net.bssid()).upper() if net.bssid() is not None else "<unavailable>"
+        if net.ssid() is None and net.bssid() is None:
+            redacted += 1
         results.append(
             {
-                "ssid": str(net.ssid()) if net.ssid() is not None else "<hidden>",
-                "bssid": (str(net.bssid()).upper() if net.bssid() is not None else "<unavailable>"),
+                "ssid": ssid,
+                "bssid": bssid,
                 "band": band,
                 "rssi_dbm": int(net.rssiValue()),
                 "channel": int(channel.channelNumber()) if channel else None,
             }
+        )
+    if results and redacted == len(results):
+        raise RuntimeError(
+            "macOS redacted every SSID and BSSID. Grant this app Location Services access, "
+            "then quit it completely, reopen it, and scan again. Do not run it with sudo."
         )
     return results
 
@@ -118,6 +188,7 @@ def initialize_state() -> None:
     st.session_state.setdefault("next_point_id", 1)
     st.session_state.setdefault("map_revision", 0)
     st.session_state.setdefault("floorplan_hash", None)
+    st.session_state.setdefault("location_manager", None)
 
 
 def add_measurement_point(x: float, y: float) -> tuple[int, int]:
@@ -456,6 +527,38 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
     initialize_state()
     st.title("macOS Wi-Fi Site Survey")
     st.caption("Upload a floor plan, then click a location to run a live CoreWLAN scan.")
+
+    if platform.system() == "Darwin":
+        location_status, manager = location_authorization()
+        status_name = LOCATION_STATUS_NAMES.get(location_status, "Unavailable")
+        with st.expander(
+            "Required: Location Services access for SSID and BSSID",
+            expanded=location_status not in LOCATION_AUTHORIZED,
+        ):
+            st.write(
+                "macOS treats Wi-Fi network names and access-point addresses as location data. "
+                "Without permission it returns redacted values, even though RSSI and channel "
+                "remain visible. Administrator or sudo access does not bypass this requirement."
+            )
+            st.write(f"**Current authorization:** {status_name}")
+            if location_status in LOCATION_AUTHORIZED:
+                st.success("Location access is ready for SSID/BSSID scans.")
+            elif getattr(sys, "frozen", False) and location_status == 0:
+                if st.button("Request Location Access"):
+                    _, requested_manager = request_location_authorization()
+                    st.session_state.location_manager = requested_manager
+                    st.info(
+                        "Respond to the macOS permission dialog, then quit and reopen the app "
+                        "before scanning."
+                    )
+            else:
+                st.warning(
+                    "Open System Settings → Privacy & Security → Location Services and enable "
+                    "WiFi Site Survey. When running from source, enable the terminal or IDE that "
+                    "starts Streamlit. Quit and reopen it after changing access."
+                )
+            if manager is not None and st.session_state.location_manager is None:
+                st.session_state.location_manager = manager
 
     uploaded = st.file_uploader("Floor plan", type=["png", "jpg", "jpeg"])
     if uploaded is None:

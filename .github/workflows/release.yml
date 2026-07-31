@@ -26,18 +26,15 @@ jobs:
           python-version: "3.13"
       - run: uv sync --all-extras --locked
       - name: Build single executable
-        run: >-
-          uv run pyinstaller --noconfirm --clean --onefile
-          --name wifi-site-survey
-          --add-data "wifi_site_survey.py:."
-          --collect-all streamlit
-          --collect-all streamlit_plotly_events
-          --hidden-import objc
-          --hidden-import CoreWLAN
-          wifi_site_survey_launcher.py
+        run: uv run pyinstaller --noconfirm --clean wifi_site_survey.spec
+      - name: Verify app metadata and ad-hoc signature
+        run: |
+          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "dist/WiFi Site Survey.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "dist/WiFi Site Survey.app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "dist/WiFi Site Survey.app"
       - name: Package executable and checksum
         run: |
-          tar -C dist -czf "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" wifi-site-survey
+          tar -C dist -czf "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" "WiFi Site Survey.app"
           shasum -a 256 "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" > "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:

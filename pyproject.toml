@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osx-wifi-mapper"
-version = "0.2.0"
+version = "0.2.1"
 description = "Native CoreWLAN Wi-Fi site surveys on an interactive floor plan"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,13 +18,14 @@ dependencies = [
   "streamlit>=1.35,<2",
   "streamlit-plotly-events>=0.0.6,<1",
   "pyobjc-framework-CoreWLAN>=10; sys_platform == 'darwin'",
+  "pyobjc-framework-CoreLocation>=10; sys_platform == 'darwin'",
 ]
 
 [project.scripts]
 wifi-site-survey = "wifi_site_survey_launcher:main"
 
 [tool.uv]
-required-version = ">=0.11.16,<0.12"
+required-version = ">=0.11.6"
 
 [project.optional-dependencies]
 dev = [

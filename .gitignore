@@ -8,4 +8,5 @@ __pycache__/
 build/
 dist/
 *.spec
+!wifi_site_survey.spec
 .DS_Store

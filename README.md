@@ -31,13 +31,33 @@ Then extract and run it:
 
 ```bash
 tar -xzf wifi-site-survey-macos-*.tar.gz
-./wifi-site-survey
+open "WiFi Site Survey.app"
 ```
 
-The executable starts a local Streamlit server and opens the app in your browser.
-macOS may require you to allow the binary in **System Settings → Privacy &
-Security**, and CoreWLAN may require Location Services permission for your
-terminal or Python host.
+The app bundle starts a local Streamlit server and opens the survey in your browser. It is ad-hoc
+signed rather than notarized with a paid Apple Developer certificate. On first launch, macOS may
+block it because it was downloaded from the internet. Open **System Settings → Privacy & Security**,
+find the blocked WiFi Site Survey message, choose **Open Anyway**, and confirm. Alternatively,
+Control-click the app in Finder and choose **Open**.
+
+### Required Location Services permission
+
+macOS considers SSIDs and BSSIDs to be location information. Without Location Services access,
+CoreWLAN still reports RSSI and channel but replaces every SSID and BSSID with redacted values. Do
+not use `sudo`; administrator privileges do not bypass this privacy control.
+
+For the downloaded app:
+
+1. Launch **WiFi Site Survey.app** and expand **Required: Location Services access for SSID and
+   BSSID**.
+2. Choose **Request Location Access** and approve the macOS dialog.
+3. If permission was previously denied, open **System Settings → Privacy & Security → Location
+   Services** and enable **WiFi Site Survey** manually.
+4. Quit WiFi Site Survey completely, reopen it, and scan again.
+
+For source installations, enable Location Services for the application that starts Streamlit—such
+as Terminal, iTerm, VS Code, or your IDE—then quit and reopen that application. A scan is rejected
+instead of storing useless data when authorization is absent or macOS redacts every SSID/BSSID.
 
 ## Run from source
 
@@ -67,8 +87,8 @@ committed `uv.lock`; standard `pip install .` remains supported.
 
 ## Releasing
 
-Push a semantic-version tag to build both macOS architectures and publish a
-GitHub release:
+Push a semantic-version tag to build ad-hoc-signed app bundles for both macOS architectures and
+publish a GitHub release:
 
 ```bash
 git tag v1.0.0
