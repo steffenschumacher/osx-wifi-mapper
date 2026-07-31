@@ -32,6 +32,26 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "dist/WiFi Site Survey.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "dist/WiFi Site Survey.app/Contents/Info.plist"
           codesign --verify --deep --strict --verbose=2 "dist/WiFi Site Survey.app"
+      - name: Smoke-test packaged web application
+        env:
+          WIFI_SITE_SURVEY_OPEN_BROWSER: "false"
+          WIFI_SITE_SURVEY_PORT: "18501"
+        run: |
+          "dist/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey" &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          for attempt in {1..60}; do
+            if curl --fail --silent "http://127.0.0.1:18501/_stcore/health" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent "http://127.0.0.1:18501/_stcore/health" | grep -q "ok"
+          curl --fail --silent "http://127.0.0.1:18501/" | grep -qi "<html"
+          if lsof -nP -iTCP:3000 -sTCP:LISTEN | grep -q wifi-site; then
+            echo "Packaged app unexpectedly opened Streamlit's development port"
+            exit 1
+          fi
       - name: Package executable and checksum
         run: |
           tar -C dist -czf "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" "WiFi Site Survey.app"

@@ -55,9 +55,12 @@ app = BUNDLE(
     name="WiFi Site Survey.app",
     icon=None,
     bundle_identifier="com.steffenschumacher.wifisitesurvey",
-    version="0.2.1",
+    version="0.2.2",
     info_plist={
         "CFBundleDisplayName": "WiFi Site Survey",
+        # The application presents its UI in the browser, so it should not appear as an
+        # unresponsive, windowless application in the Dock.
+        "LSUIElement": True,
         "NSLocationUsageDescription": (
             "WiFi Site Survey needs Location Services permission because macOS protects nearby "
             "Wi-Fi network names and access-point addresses as location information."
