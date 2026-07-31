@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     strategy:
@@ -25,21 +28,30 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras --locked
-      - name: Build single executable
+      - name: Build macOS app bundle
         run: uv run pyinstaller --noconfirm --clean wifi_site_survey.spec
       - name: Verify app metadata and ad-hoc signature
         run: |
           /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "dist/WiFi Site Survey.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "dist/WiFi Site Survey.app/Contents/Info.plist"
           codesign --verify --deep --strict --verbose=2 "dist/WiFi Site Survey.app"
-      - name: Smoke-test packaged web application
+      - name: Package app and preserve its macOS bundle structure
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/WiFi Site Survey.app" \
+            "wifi-site-survey-macos-${{ matrix.arch }}.zip"
+          shasum -a 256 "wifi-site-survey-macos-${{ matrix.arch }}.zip" > "wifi-site-survey-macos-${{ matrix.arch }}.zip.sha256"
+      - name: Smoke-test the distributed archive
         env:
           WIFI_SITE_SURVEY_OPEN_BROWSER: "false"
           WIFI_SITE_SURVEY_PORT: "18501"
         run: |
-          "dist/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey" &
+          TEST_DIR="$(mktemp -d)"
+          ditto -x -k "wifi-site-survey-macos-${{ matrix.arch }}.zip" "$TEST_DIR"
+          codesign --verify --deep --strict --verbose=2 "$TEST_DIR/WiFi Site Survey.app"
+          "$TEST_DIR/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey" &
           APP_PID=$!
-          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          trap 'kill "$APP_PID" 2>/dev/null || true; rm -rf "$TEST_DIR"' EXIT
           for attempt in {1..60}; do
             if curl --fail --silent "http://127.0.0.1:18501/_stcore/health" >/dev/null; then
               break
@@ -52,22 +64,18 @@ jobs:
             echo "Packaged app unexpectedly opened Streamlit's development port"
             exit 1
           fi
-      - name: Package executable and checksum
-        run: |
-          tar -C dist -czf "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" "WiFi Site Survey.app"
-          shasum -a 256 "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz" > "wifi-site-survey-macos-${{ matrix.arch }}.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wifi-site-survey-macos-${{ matrix.arch }}
           path: |
-            wifi-site-survey-macos-${{ matrix.arch }}.tar.gz
-            wifi-site-survey-macos-${{ matrix.arch }}.tar.gz.sha256
+            wifi-site-survey-macos-${{ matrix.arch }}.zip
+            wifi-site-survey-macos-${{ matrix.arch }}.zip.sha256
 
   publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wifi-site-survey-macos-*
           merge-multiple: true

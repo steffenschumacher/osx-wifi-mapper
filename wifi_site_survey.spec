@@ -32,10 +32,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name="wifi-site-survey",
+    exclude_binaries=True,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,17 +49,24 @@ exe = EXE(
     entitlements_file=None,
 )
 
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="wifi-site-survey",
+)
+
+app = BUNDLE(
+    coll,
     name="WiFi Site Survey.app",
     icon=None,
     bundle_identifier="com.steffenschumacher.wifisitesurvey",
-    version="0.2.2",
+    version="0.2.3",
     info_plist={
         "CFBundleDisplayName": "WiFi Site Survey",
-        # The application presents its UI in the browser, so it should not appear as an
-        # unresponsive, windowless application in the Dock.
-        "LSUIElement": True,
         "NSLocationUsageDescription": (
             "WiFi Site Survey needs Location Services permission because macOS protects nearby "
             "Wi-Fi network names and access-point addresses as location information."

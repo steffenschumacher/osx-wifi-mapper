@@ -95,8 +95,17 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The release workflow builds one self-contained executable per architecture,
-packages it with executable permissions intact, and publishes SHA-256 checksums.
+The release workflow builds a self-contained app bundle per architecture, packages it while
+preserving macOS symlinks and permissions, and publishes SHA-256 checksums.
+
+The downloadable builds are ad-hoc signed rather than Apple-notarized, so macOS may quarantine an
+app downloaded through a browser. After extracting it, clear that attribute before the first
+launch:
+
+```bash
+xattr -dr com.apple.quarantine "/path/to/WiFi Site Survey.app"
+open "/path/to/WiFi Site Survey.app"
+```
 
 ## Data and privacy
 
