@@ -68,37 +68,61 @@ def test_measurement_frame_preserves_band_and_channel_and_upgrades_old_rows() ->
     assert app.measurement_frame([old_row]).iloc[0]["band"] == "Unknown"
 
 
-def test_eligibility_requires_ten_distinct_coordinates() -> None:
-    nine = app.triple_eligibility(app.measurement_frame(sample_rows(9))).iloc[0]
-    ten = app.triple_eligibility(app.measurement_frame(sample_rows(10))).iloc[0]
+def test_eligibility_requires_five_one_metre_spaced_coordinates() -> None:
+    four = app.triple_eligibility(app.measurement_frame(sample_rows(4)), 1.0).iloc[0]
+    five = app.triple_eligibility(app.measurement_frame(sample_rows(5)), 1.0).iloc[0]
 
-    assert not bool(nine["eligible"])
-    assert nine["reason"] == "9/10 points"
-    assert bool(ten["eligible"])
-    assert ten["sample_count"] == 10
+    assert not bool(four["eligible"])
+    assert four["reason"] == "4/5 points"
+    assert bool(five["eligible"])
+    assert five["sample_count"] == 5
+
+
+def test_eligibility_requires_calibration_and_one_metre_spacing() -> None:
+    measurements = app.measurement_frame(sample_rows(5))
+    uncalibrated = app.triple_eligibility(measurements).iloc[0]
+    too_close = app.triple_eligibility(measurements, 0.05).iloc[0]
+
+    assert uncalibrated["reason"] == "distance calibration required"
+    assert not bool(uncalibrated["eligible"])
+    assert too_close["sample_count"] < 5
+    assert not bool(too_close["eligible"])
+
+
+def test_calibration_and_minimum_point_spacing() -> None:
+    assert app.calibration_scale((0.0, 0.0), (3.0, 4.0), 10.0) == 2.0
+    points = pd.DataFrame([{"x": 10.0, "y": 10.0}])
+
+    assert not app.point_has_minimum_spacing(10.5, 10.0, points, 1.0)
+    assert app.point_has_minimum_spacing(11.0, 10.0, points, 1.0)
+
+    with pytest.raises(ValueError, match="different"):
+        app.calibration_scale((1.0, 1.0), (1.0, 1.0), 2.0)
 
 
 def test_duplicate_coordinates_do_not_inflate_eligibility() -> None:
-    rows = sample_rows(9)
+    rows = sample_rows(4)
     duplicate = dict(rows[0], point_id=99, rssi_dbm=-30)
-    result = app.triple_eligibility(app.measurement_frame([*rows, duplicate])).iloc[0]
+    result = app.triple_eligibility(app.measurement_frame([*rows, duplicate]), 1.0).iloc[0]
 
-    assert result["sample_count"] == 9
+    assert result["sample_count"] == 4
     assert not bool(result["eligible"])
 
 
 def test_collinear_samples_are_ineligible() -> None:
-    result = app.triple_eligibility(app.measurement_frame(sample_rows(10, collinear=True))).iloc[0]
+    result = app.triple_eligibility(
+        app.measurement_frame(sample_rows(5, collinear=True)), 1.0
+    ).iloc[0]
 
     assert not bool(result["eligible"])
     assert result["reason"] == "insufficient spatial spread"
 
 
 def test_effectively_collinear_samples_are_ineligible() -> None:
-    rows = sample_rows(10)
+    rows = sample_rows(5)
     for index, row in enumerate(rows):
         row["y"] = float(index * 0.001)
-    result = app.triple_eligibility(app.measurement_frame(rows)).iloc[0]
+    result = app.triple_eligibility(app.measurement_frame(rows), 1.0).iloc[0]
 
     assert not bool(result["eligible"])
     assert result["reason"] == "insufficient spatial spread"
@@ -107,17 +131,23 @@ def test_effectively_collinear_samples_are_ineligible() -> None:
 def test_filtering_returns_only_matching_eligible_triples() -> None:
     measurements = app.measurement_frame(
         [
-            *sample_rows(10, ssid="Home", bssid="AA", band="5 GHz"),
-            *sample_rows(10, ssid="Home", bssid="BB", band="2.4 GHz"),
-            *sample_rows(9, ssid="Guest", bssid="CC", band="6 GHz"),
+            *sample_rows(5, ssid="Home", bssid="AA", band="5 GHz"),
+            *sample_rows(5, ssid="Home", bssid="BB", band="2.4 GHz"),
+            *sample_rows(4, ssid="Guest", bssid="CC", band="6 GHz"),
         ]
     )
-    eligibility = app.triple_eligibility(measurements)
+    eligibility = app.triple_eligibility(measurements, 1.0)
 
     assert app.select_eligible_triples(eligibility, ["Home"], ["AA", "CC"], ["5 GHz", "6 GHz"]) == [
         ("Home", "AA", "5 GHz")
     ]
-    assert app.select_eligible_triples(eligibility, [], ["AA"], ["5 GHz"]) == []
+    assert app.select_eligible_triples(eligibility, [], ["AA"], ["5 GHz"]) == [
+        ("Home", "AA", "5 GHz")
+    ]
+    assert set(app.select_eligible_triples(eligibility, [], [], [])) == {
+        ("Home", "AA", "5 GHz"),
+        ("Home", "BB", "2.4 GHz"),
+    }
 
 
 def test_interpolation_preserves_samples_and_masks_outside_hull() -> None:
@@ -149,16 +179,17 @@ def test_combine_surfaces_uses_max_and_preserves_unknown_cells() -> None:
 
 def test_heatmap_interpolates_triples_independently_then_uses_strongest() -> None:
     rows = [
-        *sample_rows(10, bssid="AA", rssi=-70),
-        *sample_rows(10, bssid="BB", rssi=-50),
+        *sample_rows(5, bssid="AA", rssi=-70),
+        *sample_rows(5, bssid="BB", rssi=-50),
     ]
-    axis, surface = app.heatmap_surface(
+    x_axis, y_axis, surface = app.heatmap_surface(
         app.measurement_frame(rows),
         [("Home", "AA", "5 GHz"), ("Home", "BB", "5 GHz")],
         resolution=21,
     )
 
-    assert len(axis) == 21
+    assert len(x_axis) == 21
+    assert len(y_axis) == 21
     assert surface is not None
     assert surface[0, 0] == -50.0
 
@@ -189,7 +220,7 @@ def test_build_map_layers_click_surface_heatmap_and_markers() -> None:
     axis = np.array([0.0, 100.0])
     surface = np.array([[-80.0, -70.0], [-60.0, np.nan]])
 
-    figure = app.build_map(image, markers, axis, surface, 0.4)
+    figure = app.build_map(image, markers, axis, axis / 2, surface, 0.4)
 
     assert len(figure.layout.images) == 1
     assert [trace.type for trace in figure.data] == ["heatmap", "heatmap", "scatter"]
@@ -197,12 +228,14 @@ def test_build_map_layers_click_surface_heatmap_and_markers() -> None:
     assert figure.data[1].zmax == app.RSSI_MAX
     assert figure.data[1].opacity == 0.4
     assert figure.data[2].marker.symbol == "diamond"
+    assert figure.layout.images[0].sizey == 50
+    assert figure.layout.yaxis.range == (0, 50)
 
 
 def test_add_and_delete_measurement_recalculates_eligibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rows = sample_rows(9)
+    rows = sample_rows(4)
     points = [
         {"point_id": row["point_id"], "x": row["x"], "y": row["y"], "access_points": 1}
         for row in rows
@@ -210,7 +243,7 @@ def test_add_and_delete_measurement_recalculates_eligibility(
     state = types.SimpleNamespace(
         points=points,
         measurements=rows,
-        next_point_id=10,
+        next_point_id=5,
         map_revision=0,
         floorplan_hash=None,
     )
@@ -230,14 +263,14 @@ def test_add_and_delete_measurement_recalculates_eligibility(
     )
 
     point_id, count = app.add_measurement_point(50.0, 40.0)
-    assert (point_id, count) == (10, 1)
+    assert (point_id, count) == (5, 1)
     assert bool(
-        app.triple_eligibility(app.measurement_frame(state.measurements)).iloc[0]["eligible"]
+        app.triple_eligibility(app.measurement_frame(state.measurements), 1.0).iloc[0]["eligible"]
     )
 
-    app.delete_measurement_point(10)
-    after = app.triple_eligibility(app.measurement_frame(state.measurements)).iloc[0]
-    assert after["sample_count"] == 9
+    app.delete_measurement_point(5)
+    after = app.triple_eligibility(app.measurement_frame(state.measurements), 1.0).iloc[0]
+    assert after["sample_count"] == 4
     assert not bool(after["eligible"])
     assert state.map_revision == 1
 

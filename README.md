@@ -11,11 +11,13 @@ Every scan records SSID, BSSID, Wi-Fi band (2.4, 5, or 6 GHz), channel, and RSSI
 access point. The map always shows the measured coordinates as blue diamond markers; hover a
 marker to see every reading captured there.
 
-A specific `(SSID, BSSID, band)` combination becomes available in the heatmap filters after it
-has been observed at 10 distinct, spatially spread coordinates. Choose an eligible SSID, BSSID,
-and band in the sidebar to render a semi-transparent red–yellow–green RSSI surface. When several
-eligible combinations are selected, the map shows the strongest interpolated RSSI at each
-location. Missing scan results remain unknown rather than being treated as weak signals.
+Before scanning, calibrate the proportional floor plan by clicking the endpoints of a known
+straight-line distance and entering its length in metres. A specific `(SSID, BSSID, band)`
+combination becomes heatmap-eligible after it has been observed at five two-dimensionally spread
+points, each at least one metre apart. SSID, BSSID, and band filters operate independently; leave
+one empty to include all of its values. When several eligible combinations match, the map shows
+the strongest interpolated RSSI at each location. Missing results remain unknown rather than
+being treated as weak signals.
 
 Interpolation is limited to the surveyed area. It visualizes the samples you collected; it does
 not model walls, building materials, interference, or predict RF propagation in unsurveyed rooms.
@@ -24,13 +26,13 @@ not model walls, building materials, interference, or predict RF propagation in 
 
 Download the archive for your Mac from the latest GitHub release:
 
-- `wifi-site-survey-macos-arm64.tar.gz` for Apple Silicon
-- `wifi-site-survey-macos-x86_64.tar.gz` for Intel
+- `wifi-site-survey-macos-arm64.zip` for Apple Silicon
+- `wifi-site-survey-macos-x86_64.zip` for Intel
 
 Then extract and run it:
 
 ```bash
-tar -xzf wifi-site-survey-macos-*.tar.gz
+xattr -dr com.apple.quarantine "WiFi Site Survey.app"
 open "WiFi Site Survey.app"
 ```
 

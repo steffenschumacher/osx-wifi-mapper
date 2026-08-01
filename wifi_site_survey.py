@@ -41,7 +41,8 @@ MEASUREMENT_COLUMNS = [
 ]
 
 TRIPLE_COLUMNS = ["ssid", "bssid", "band"]
-MIN_HEATMAP_SAMPLES = 10
+MIN_HEATMAP_SAMPLES = 5
+MIN_SAMPLE_DISTANCE_METERS = 1.0
 RSSI_MIN = -90
 RSSI_MAX = -40
 RSSI_COLORSCALE = [
@@ -189,6 +190,8 @@ def initialize_state() -> None:
     st.session_state.setdefault("map_revision", 0)
     st.session_state.setdefault("floorplan_hash", None)
     st.session_state.setdefault("location_manager", None)
+    st.session_state.setdefault("calibration_points", [])
+    st.session_state.setdefault("meters_per_unit", None)
 
 
 def add_measurement_point(x: float, y: float) -> tuple[int, int]:
@@ -255,7 +258,51 @@ def _has_spatial_spread(coordinates: np.ndarray) -> bool:
     )
 
 
-def triple_eligibility(measurements: pd.DataFrame) -> pd.DataFrame:
+def calibration_scale(
+    start: tuple[float, float], end: tuple[float, float], real_distance_meters: float
+) -> float:
+    """Return metres per map-coordinate unit for a measured reference line."""
+    coordinate_distance = float(np.linalg.norm(np.asarray(end) - np.asarray(start)))
+    if coordinate_distance <= 0:
+        raise ValueError("Calibration points must be different.")
+    if real_distance_meters <= 0:
+        raise ValueError("Calibration distance must be greater than zero.")
+    return float(real_distance_meters) / coordinate_distance
+
+
+def spaced_coordinates(
+    coordinates: np.ndarray,
+    meters_per_unit: float,
+    minimum_distance_meters: float = MIN_SAMPLE_DISTANCE_METERS,
+) -> np.ndarray:
+    """Return a deterministic subset whose points are at least the requested distance apart."""
+    accepted: list[np.ndarray] = []
+    for coordinate in sorted(map(tuple, np.asarray(coordinates, dtype=float))):
+        candidate = np.asarray(coordinate, dtype=float)
+        if all(
+            np.linalg.norm(candidate - existing) * meters_per_unit >= minimum_distance_meters - 1e-9
+            for existing in accepted
+        ):
+            accepted.append(candidate)
+    return np.asarray(accepted, dtype=float).reshape((-1, 2))
+
+
+def point_has_minimum_spacing(
+    x: float,
+    y: float,
+    points: pd.DataFrame,
+    meters_per_unit: float,
+) -> bool:
+    """Return whether a prospective sample is at least one metre from every existing point."""
+    if points.empty:
+        return True
+    distances = np.linalg.norm(points[["x", "y"]].to_numpy(dtype=float) - [x, y], axis=1)
+    return bool(np.all(distances * meters_per_unit >= MIN_SAMPLE_DISTANCE_METERS - 1e-9))
+
+
+def triple_eligibility(
+    measurements: pd.DataFrame, meters_per_unit: float | None = None
+) -> pd.DataFrame:
     """Describe heatmap eligibility for every observed SSID/BSSID/band triple."""
     columns = [*TRIPLE_COLUMNS, "sample_count", "eligible", "reason"]
     if measurements.empty:
@@ -263,10 +310,17 @@ def triple_eligibility(measurements: pd.DataFrame) -> pd.DataFrame:
 
     records: list[dict[str, Any]] = []
     for triple, group in measurements.groupby(TRIPLE_COLUMNS, dropna=False, sort=True):
-        unique_points = group[["x", "y"]].drop_duplicates()
-        sample_count = len(unique_points)
-        spatially_valid = _has_spatial_spread(unique_points.to_numpy(dtype=float))
-        if sample_count < MIN_HEATMAP_SAMPLES:
+        unique_points = group[["x", "y"]].drop_duplicates().to_numpy(dtype=float)
+        spaced_points = (
+            spaced_coordinates(unique_points, meters_per_unit)
+            if meters_per_unit is not None
+            else np.empty((0, 2))
+        )
+        sample_count = len(spaced_points)
+        spatially_valid = _has_spatial_spread(spaced_points)
+        if meters_per_unit is None:
+            reason = "distance calibration required"
+        elif sample_count < MIN_HEATMAP_SAMPLES:
             reason = f"{sample_count}/{MIN_HEATMAP_SAMPLES} points"
         elif not spatially_valid:
             reason = "insufficient spatial spread"
@@ -276,7 +330,11 @@ def triple_eligibility(measurements: pd.DataFrame) -> pd.DataFrame:
             {
                 **dict(zip(TRIPLE_COLUMNS, triple, strict=True)),
                 "sample_count": sample_count,
-                "eligible": sample_count >= MIN_HEATMAP_SAMPLES and spatially_valid,
+                "eligible": (
+                    meters_per_unit is not None
+                    and sample_count >= MIN_HEATMAP_SAMPLES
+                    and spatially_valid
+                ),
                 "reason": reason,
             }
         )
@@ -289,15 +347,16 @@ def select_eligible_triples(
     bssids: list[str],
     bands: list[str],
 ) -> list[Triple]:
-    """Return eligible triples matching all three cascading filter selections."""
-    if eligibility.empty or not ssids or not bssids or not bands:
+    """Return eligible triples matching each independently optional filter."""
+    if eligibility.empty:
         return []
-    selected = eligibility[
-        eligibility["eligible"]
-        & eligibility["ssid"].isin(ssids)
-        & eligibility["bssid"].isin(bssids)
-        & eligibility["band"].isin(bands)
-    ]
+    selected = eligibility[eligibility["eligible"]]
+    if ssids:
+        selected = selected[selected["ssid"].isin(ssids)]
+    if bssids:
+        selected = selected[selected["bssid"].isin(bssids)]
+    if bands:
+        selected = selected[selected["band"].isin(bands)]
     return [tuple(row) for row in selected[TRIPLE_COLUMNS].itertuples(index=False, name=None)]
 
 
@@ -339,13 +398,16 @@ def _inside_convex_polygon(grid_x: np.ndarray, grid_y: np.ndarray, hull: np.ndar
 def interpolate_rssi(
     coordinates: np.ndarray,
     values: np.ndarray,
-    grid_axis: np.ndarray,
+    grid_x_axis: np.ndarray,
+    grid_y_axis: np.ndarray | None = None,
     power: float = 2.0,
 ) -> np.ndarray:
     """Interpolate RSSI with IDW and mask cells outside the sampled convex hull."""
     coordinates = np.asarray(coordinates, dtype=float)
     values = np.asarray(values, dtype=float)
-    grid_x, grid_y = np.meshgrid(grid_axis, grid_axis)
+    if grid_y_axis is None:
+        grid_y_axis = grid_x_axis
+    grid_x, grid_y = np.meshgrid(grid_x_axis, grid_y_axis)
     if not _has_spatial_spread(coordinates):
         return np.full_like(grid_x, np.nan, dtype=float)
 
@@ -381,9 +443,12 @@ def heatmap_surface(
     measurements: pd.DataFrame,
     selected_triples: list[Triple],
     resolution: int = 101,
-) -> tuple[np.ndarray, np.ndarray | None]:
+    y_max: float = 100.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Interpolate eligible triples independently and combine them by strongest RSSI."""
-    grid_axis = np.linspace(0.0, 100.0, resolution)
+    grid_x_axis = np.linspace(0.0, 100.0, resolution)
+    y_resolution = max(2, round(resolution * y_max / 100.0))
+    grid_y_axis = np.linspace(0.0, y_max, y_resolution)
     surfaces: list[np.ndarray] = []
     for ssid, bssid, band in selected_triples:
         group = measurements[
@@ -396,9 +461,24 @@ def heatmap_surface(
         if len(coordinates) < MIN_HEATMAP_SAMPLES or not _has_spatial_spread(coordinates):
             continue
         surfaces.append(
-            interpolate_rssi(coordinates, samples["rssi_dbm"].to_numpy(dtype=float), grid_axis)
+            interpolate_rssi(
+                coordinates,
+                samples["rssi_dbm"].to_numpy(dtype=float),
+                grid_x_axis,
+                grid_y_axis,
+            )
         )
-    return grid_axis, combine_surfaces(surfaces)
+    return grid_x_axis, grid_y_axis, combine_surfaces(surfaces)
+
+
+def image_y_max(image: Image.Image) -> float:
+    """Return the image height in isotropic width-normalized map coordinates."""
+    return 100.0 * image.height / image.width
+
+
+def map_height(image: Image.Image) -> int:
+    """Return a practical Plotly height while retaining the image aspect ratio."""
+    return max(350, min(900, round(700 * image.height / image.width)))
 
 
 def format_hover_readings(group: pd.DataFrame) -> str:
@@ -432,20 +512,23 @@ def marker_frame(points: pd.DataFrame, measurements: pd.DataFrame) -> pd.DataFra
 def build_map(
     image: Image.Image,
     markers: pd.DataFrame,
-    grid_axis: np.ndarray | None = None,
+    grid_x_axis: np.ndarray | None = None,
+    grid_y_axis: np.ndarray | None = None,
     surface: np.ndarray | None = None,
     heatmap_opacity: float = 0.55,
+    calibration_points: list[tuple[float, float]] | None = None,
 ) -> go.Figure:
     """Build the clickable floor-plan, RSSI overlay, and sample markers."""
     figure = go.Figure()
+    y_max = image_y_max(image)
     figure.add_layout_image(
         source=image,
         xref="x",
         yref="y",
         x=0,
-        y=100,
+        y=y_max,
         sizex=100,
-        sizey=100,
+        sizey=y_max,
         sizing="stretch",
         opacity=1,
         layer="below",
@@ -453,12 +536,13 @@ def build_map(
 
     # Plotly emits click events for traces, not bare layout images. A transparent
     # 101x101 heatmap makes every location clickable in relative 0–100 coordinates.
-    grid = list(range(101))
+    grid_x = np.linspace(0.0, 100.0, 101)
+    grid_y = np.linspace(0.0, y_max, max(2, round(y_max) + 1))
     figure.add_trace(
         go.Heatmap(
-            x=grid,
-            y=grid,
-            z=[[0] * 101 for _ in grid],
+            x=grid_x,
+            y=grid_y,
+            z=np.zeros((len(grid_y), len(grid_x))),
             opacity=0.01,
             showscale=False,
             hovertemplate="x=%{x:.0f}, y=%{y:.0f}<extra></extra>",
@@ -466,11 +550,11 @@ def build_map(
         )
     )
 
-    if surface is not None and grid_axis is not None:
+    if surface is not None and grid_x_axis is not None and grid_y_axis is not None:
         figure.add_trace(
             go.Heatmap(
-                x=grid_axis,
-                y=grid_axis,
+                x=grid_x_axis,
+                y=grid_y_axis,
                 z=surface,
                 zmin=RSSI_MIN,
                 zmax=RSSI_MAX,
@@ -479,6 +563,21 @@ def build_map(
                 colorbar={"title": {"text": "RSSI<br>dBm"}},
                 hovertemplate="RSSI=%{z:.1f} dBm<extra></extra>",
                 name="Strongest selected signal",
+                zsmooth="best",
+            )
+        )
+
+    if calibration_points:
+        calibration = np.asarray(calibration_points, dtype=float)
+        figure.add_trace(
+            go.Scatter(
+                x=calibration[:, 0],
+                y=calibration[:, 1],
+                mode="lines+markers",
+                line={"color": "#7c3aed", "width": 4},
+                marker={"color": "#7c3aed", "size": 12},
+                hovertemplate="Calibration endpoint<extra></extra>",
+                name="Calibration line",
             )
         )
 
@@ -504,7 +603,7 @@ def build_map(
         )
 
     figure.update_layout(
-        height=700,
+        height=map_height(image),
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
         title="Click the floor plan to scan",
         showlegend=False,
@@ -512,7 +611,7 @@ def build_map(
         dragmode=False,
         xaxis={"range": [0, 100], "title": "X", "fixedrange": True},
         yaxis={
-            "range": [0, 100],
+            "range": [0, y_max],
             "title": "Y",
             "fixedrange": True,
             "scaleanchor": "x",
@@ -572,6 +671,8 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         st.session_state.points = []
         st.session_state.measurements = []
         st.session_state.next_point_id = 1
+        st.session_state.calibration_points = []
+        st.session_state.meters_per_unit = None
         st.session_state.map_revision += 1
 
     try:
@@ -580,30 +681,52 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         st.error(f"Could not read the floor plan: {exc}")
         return
 
+    y_max = image_y_max(floorplan)
     measurements = measurement_frame(st.session_state.measurements)
     points = pd.DataFrame(st.session_state.points)
-    eligibility = triple_eligibility(measurements)
+    eligibility = triple_eligibility(measurements, st.session_state.meters_per_unit)
     eligible = eligibility[eligibility["eligible"]]
     with st.sidebar:
+        st.header("Distance calibration")
+        calibration_points = st.session_state.calibration_points
+        if st.session_state.meters_per_unit is None:
+            if len(calibration_points) < 2:
+                st.warning(
+                    "Click two endpoints of a known straight-line distance on the floor plan."
+                )
+            else:
+                real_distance = st.number_input(
+                    "Reference distance (metres)", min_value=0.01, value=1.0, step=0.1
+                )
+                if st.button("Apply calibration", type="primary"):
+                    st.session_state.meters_per_unit = calibration_scale(
+                        tuple(calibration_points[0]), tuple(calibration_points[1]), real_distance
+                    )
+                    st.session_state.map_revision += 1
+                    st.rerun()
+        else:
+            units_per_meter = 1.0 / st.session_state.meters_per_unit
+            st.success(f"Calibrated: {units_per_meter:.2f} map units per metre")
+            if st.button("Recalibrate"):
+                st.session_state.calibration_points = []
+                st.session_state.meters_per_unit = None
+                st.session_state.map_revision += 1
+                st.rerun()
+
         st.header("Heatmap filters")
         if eligible.empty:
-            st.caption(f"A network needs {MIN_HEATMAP_SAMPLES} spatially spread samples.")
+            st.caption(
+                f"A network needs {MIN_HEATMAP_SAMPLES} samples, each at least "
+                f"{MIN_SAMPLE_DISTANCE_METERS:g} m apart, with two-dimensional spread."
+            )
             selected_ssids: list[str] = []
             selected_bssids: list[str] = []
             selected_bands: list[str] = []
         else:
             selected_ssids = st.multiselect("SSID", sorted(eligible["ssid"].unique()))
-            bssid_options = sorted(
-                eligible.loc[eligible["ssid"].isin(selected_ssids), "bssid"].unique()
-            )
-            selected_bssids = st.multiselect("BSSID", bssid_options)
-            band_options = sorted(
-                eligible.loc[
-                    eligible["ssid"].isin(selected_ssids) & eligible["bssid"].isin(selected_bssids),
-                    "band",
-                ].unique()
-            )
-            selected_bands = st.multiselect("Band", band_options)
+            selected_bssids = st.multiselect("BSSID", sorted(eligible["bssid"].unique()))
+            selected_bands = st.multiselect("Band", sorted(eligible["band"].unique()))
+            st.caption("Leave a filter empty to include all of its values.")
         heatmap_opacity = st.slider("Heatmap opacity", 0.1, 0.9, 0.55, 0.05)
         st.markdown(
             "**Fixed RSSI scale**  \n🟢 strong  \n🟡 intermediate  \n🔴 weak  \n"
@@ -618,29 +741,55 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
     selected_triples = select_eligible_triples(
         eligibility, selected_ssids, selected_bssids, selected_bands
     )
-    grid_axis, surface = heatmap_surface(measurements, selected_triples)
+    grid_x_axis, grid_y_axis, surface = heatmap_surface(measurements, selected_triples, y_max=y_max)
     markers = marker_frame(points, measurements)
-    if eligible.empty:
-        st.info(f"Collect at least {MIN_HEATMAP_SAMPLES} spatially spread samples for a network.")
-    elif not selected_triples:
-        st.info("Select an eligible SSID, BSSID, and band to display its heatmap.")
-    figure = build_map(floorplan, markers, grid_axis, surface, heatmap_opacity)
+    if st.session_state.meters_per_unit is None:
+        st.info("Calibrate the floor plan before collecting measurement points.")
+    elif eligible.empty:
+        st.info(
+            f"Collect at least {MIN_HEATMAP_SAMPLES} samples at least "
+            f"{MIN_SAMPLE_DISTANCE_METERS:g} m apart for a network."
+        )
+    figure = build_map(
+        floorplan,
+        markers,
+        grid_x_axis,
+        grid_y_axis,
+        surface,
+        heatmap_opacity,
+        st.session_state.calibration_points,
+    )
+    plot_height = map_height(floorplan)
     clicks = plotly_events(
         figure,
         click_event=True,
         select_event=False,
         hover_event=False,
-        override_height=700,
+        override_height=plot_height,
         key=f"survey-map-{st.session_state.map_revision}",
     )
 
     if clicks:
         click = clicks[-1]
         try:
-            with st.spinner("Scanning all visible Wi-Fi networks…"):
-                point_id, count = add_measurement_point(click["x"], click["y"])
-            st.session_state.map_revision += 1  # consume the component click event
-            st.toast(f"Point {point_id}: captured {count} access point(s).")
+            x, y = float(click["x"]), float(click["y"])
+            if st.session_state.meters_per_unit is None:
+                if len(st.session_state.calibration_points) >= 2:
+                    st.session_state.calibration_points = []
+                st.session_state.calibration_points.append((x, y))
+                st.session_state.map_revision += 1
+            elif not point_has_minimum_spacing(x, y, points, st.session_state.meters_per_unit):
+                st.session_state.map_revision += 1
+                st.error(
+                    f"Measurement points must be at least {MIN_SAMPLE_DISTANCE_METERS:g} metre "
+                    "apart. Choose another location."
+                )
+                return
+            else:
+                with st.spinner("Scanning all visible Wi-Fi networks…"):
+                    point_id, count = add_measurement_point(x, y)
+                st.session_state.map_revision += 1  # consume the component click event
+                st.toast(f"Point {point_id}: captured {count} access point(s).")
             st.rerun()
         except Exception as exc:
             st.session_state.map_revision += 1  # allow a retry at the same location
