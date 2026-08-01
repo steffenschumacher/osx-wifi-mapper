@@ -100,6 +100,14 @@ def test_calibration_and_minimum_point_spacing() -> None:
         app.calibration_scale((1.0, 1.0), (1.0, 1.0), 2.0)
 
 
+def test_click_coordinates_support_values_and_heatmap_indices() -> None:
+    x_axis = np.array([0.0, 50.0, 100.0])
+    y_axis = np.array([0.0, 25.0, 50.0])
+
+    assert app.click_coordinates({"x": 12.5, "y": 7.5}, x_axis, y_axis) == (12.5, 7.5)
+    assert app.click_coordinates({"pointNumber": [1, 2]}, x_axis, y_axis) == (100.0, 25.0)
+
+
 def test_duplicate_coordinates_do_not_inflate_eligibility() -> None:
     rows = sample_rows(4)
     duplicate = dict(rows[0], point_id=99, rssi_dbm=-30)
@@ -230,6 +238,10 @@ def test_build_map_layers_click_surface_heatmap_and_markers() -> None:
     assert figure.data[2].marker.symbol == "diamond"
     assert figure.layout.images[0].sizey == 50
     assert figure.layout.yaxis.range == (0, 50)
+    serialized = figure.to_plotly_json()
+    assert isinstance(serialized["data"][0]["x"], list)
+    assert isinstance(serialized["data"][1]["x"], list)
+    assert isinstance(serialized["data"][1]["z"], list)
 
 
 def test_add_and_delete_measurement_recalculates_eligibility(

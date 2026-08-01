@@ -481,6 +481,19 @@ def map_height(image: Image.Image) -> int:
     return max(350, min(900, round(700 * image.height / image.width)))
 
 
+def click_coordinates(
+    click: dict[str, Any], x_axis: np.ndarray, y_axis: np.ndarray
+) -> tuple[float, float]:
+    """Extract map coordinates from Plotly click data, including heatmap point-index fallback."""
+    if "x" in click and "y" in click:
+        return float(click["x"]), float(click["y"])
+    point_number = click.get("pointNumber")
+    if isinstance(point_number, (list, tuple)) and len(point_number) == 2:
+        row, column = map(int, point_number)
+        return float(x_axis[column]), float(y_axis[row])
+    raise ValueError("The map click did not include usable coordinates. Please click again.")
+
+
 def format_hover_readings(group: pd.DataFrame) -> str:
     """Format every AP reading at a point for Plotly marker hover text."""
     if group.empty:
@@ -534,16 +547,17 @@ def build_map(
         layer="below",
     )
 
-    # Plotly emits click events for traces, not bare layout images. A transparent
-    # 101x101 heatmap makes every location clickable in relative 0–100 coordinates.
+    # Plotly emits click events for traces, not bare layout images. Keep a nearly
+    # transparent heatmap above the image so clicks are reliably hit-tested.
     grid_x = np.linspace(0.0, 100.0, 101)
     grid_y = np.linspace(0.0, y_max, max(2, round(y_max) + 1))
     figure.add_trace(
         go.Heatmap(
-            x=grid_x,
-            y=grid_y,
-            z=np.zeros((len(grid_y), len(grid_x))),
-            opacity=0.01,
+            x=grid_x.tolist(),
+            y=grid_y.tolist(),
+            z=np.zeros((len(grid_y), len(grid_x))).tolist(),
+            colorscale=[[0.0, "rgba(255,255,255,0.01)"], [1.0, "rgba(255,255,255,0.01)"]],
+            opacity=1.0,
             showscale=False,
             hovertemplate="x=%{x:.0f}, y=%{y:.0f}<extra></extra>",
             name="Click to scan",
@@ -553,9 +567,11 @@ def build_map(
     if surface is not None and grid_x_axis is not None and grid_y_axis is not None:
         figure.add_trace(
             go.Heatmap(
-                x=grid_x_axis,
-                y=grid_y_axis,
-                z=surface,
+                # streamlit-plotly-events does not reliably decode Plotly 6's binary
+                # typed-array representation, so keep component payloads as JSON lists.
+                x=grid_x_axis.tolist(),
+                y=grid_y_axis.tolist(),
+                z=surface.tolist(),
                 zmin=RSSI_MIN,
                 zmax=RSSI_MAX,
                 colorscale=RSSI_COLORSCALE,
@@ -571,8 +587,8 @@ def build_map(
         calibration = np.asarray(calibration_points, dtype=float)
         figure.add_trace(
             go.Scatter(
-                x=calibration[:, 0],
-                y=calibration[:, 1],
+                x=calibration[:, 0].tolist(),
+                y=calibration[:, 1].tolist(),
                 mode="lines+markers",
                 line={"color": "#7c3aed", "width": 4},
                 marker={"color": "#7c3aed", "size": 12},
@@ -605,7 +621,11 @@ def build_map(
     figure.update_layout(
         height=map_height(image),
         margin={"l": 10, "r": 10, "t": 35, "b": 10},
-        title="Click the floor plan to scan",
+        title=(
+            "Click two endpoints to calibrate distance"
+            if calibration_points is not None and len(calibration_points) < 2
+            else "Click the floor plan to scan"
+        ),
         showlegend=False,
         clickmode="event+select",
         dragmode=False,
@@ -694,6 +714,14 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
                 st.warning(
                     "Click two endpoints of a known straight-line distance on the floor plan."
                 )
+                if calibration_points:
+                    first_x, first_y = calibration_points[0]
+                    st.info(
+                        f"First endpoint recorded at ({first_x:.1f}, {first_y:.1f}). "
+                        "Now click the second endpoint."
+                    )
+                else:
+                    st.info("Waiting for the first endpoint click.")
             else:
                 real_distance = st.number_input(
                     "Reference distance (metres)", min_value=0.01, value=1.0, step=0.1
@@ -772,11 +800,16 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
     if clicks:
         click = clicks[-1]
         try:
-            x, y = float(click["x"]), float(click["y"])
+            click_x_axis = np.linspace(0.0, 100.0, 101)
+            click_y_axis = np.linspace(0.0, y_max, max(2, round(y_max) + 1))
+            x, y = click_coordinates(click, click_x_axis, click_y_axis)
             if st.session_state.meters_per_unit is None:
                 if len(st.session_state.calibration_points) >= 2:
                     st.session_state.calibration_points = []
-                st.session_state.calibration_points.append((x, y))
+                st.session_state.calibration_points = [
+                    *st.session_state.calibration_points,
+                    (x, y),
+                ]
                 st.session_state.map_revision += 1
             elif not point_has_minimum_spacing(x, y, points, st.session_state.meters_per_unit):
                 st.session_state.map_revision += 1
