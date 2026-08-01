@@ -4,8 +4,8 @@ import io
 
 from PIL import Image
 
-from native_wifi_mapper import ScanWorker, SurveyWindow
-from survey_core import SurveyDocument
+from native_wifi_mapper import HeatmapWorker, ScanWorker, SurveyWindow
+from survey_core import SurveyDocument, measurement_frame
 
 
 def document() -> SurveyDocument:
@@ -64,6 +64,30 @@ def test_scan_worker_reports_success(monkeypatch, qtbot) -> None:
     assert signal.args == [expected]
 
 
+def test_heatmap_worker_reports_surface(qtbot) -> None:
+    survey = document()
+    survey.meters_per_unit = 1.0
+    reading = {
+        "ssid": "Home",
+        "bssid": "AA",
+        "band": "5 GHz",
+        "rssi_dbm": -55,
+        "channel": 44,
+    }
+    for x, y in ((0, 0), (20, 0), (0, 20), (20, 20), (40, 20)):
+        survey.add_measurement(x, y, [reading])
+    worker = HeatmapWorker(
+        7,
+        measurement_frame(survey.measurements),
+        [("Home", "AA", "5 GHz")],
+        survey.y_max,
+    )
+    with qtbot.waitSignal(worker.signals.finished, timeout=1000) as signal:
+        worker.run()
+    assert signal.args[0] == 7
+    assert signal.args[1] is not None
+
+
 def test_filters_create_heatmap_and_point_deletion(qtbot) -> None:
     window = SurveyWindow()
     qtbot.addWidget(window)
@@ -84,6 +108,9 @@ def test_filters_create_heatmap_and_point_deletion(qtbot) -> None:
     assert window.ssid_list.count() == 1
     assert window.bssid_list.count() == 1
     assert window.band_list.count() == 1
+    qtbot.waitUntil(
+        lambda: any(item.data(1) == "heatmap" for item in window.scene.items()), timeout=2000
+    )
     assert any(item.data(1) == "heatmap" for item in window.scene.items())
 
     marker = next(item for item in window.scene.items() if item.data(0) == 1)

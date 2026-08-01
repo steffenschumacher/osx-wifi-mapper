@@ -22,10 +22,16 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.13"
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install --yes libegl1
       - run: uv sync --all-extras --locked
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run bandit -c pyproject.toml -r .
+      - run: uv run detect-secrets scan --baseline .secrets.baseline
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: uv run pytest
 
   macos-app:

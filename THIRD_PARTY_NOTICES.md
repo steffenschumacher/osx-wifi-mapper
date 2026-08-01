@@ -9,8 +9,8 @@ by this project are available under the GNU Lesser General Public License versio
 components, the GNU General Public License version 3. The native application intentionally uses
 Qt Widgets/Core/Gui modules available under LGPLv3 and does not use GPL-only Qt modules.
 
-The complete LGPLv3 license text and corresponding Qt source availability information must
-accompany distributed native application bundles. See:
+The complete LGPLv3 and incorporated GPLv3 license texts are included in the `LICENSES` directory
+of distributed native application bundles. Corresponding Qt source is available from:
 
 - https://www.gnu.org/licenses/lgpl-3.0.html
 - https://doc.qt.io/qt-6/licensing.html

@@ -98,7 +98,16 @@ uv run wifi-site-survey-native
 ```
 
 PySide6 is distributed under LGPLv3/GPLv3 or commercial terms. This project uses dynamically
-linked Qt libraries under LGPLv3; release bundles must retain the applicable Qt license notices.
+linked Qt libraries under LGPLv3. The native bundle includes `THIRD_PARTY_NOTICES.md` and the GPLv3
+and LGPLv3 texts under `LICENSES`; users may replace the bundled compatible Qt dynamic libraries.
+
+On first use, choose **Request Location Access** and approve WiFi Site Survey in System Settings →
+Privacy & Security → Location Services. SSID and BSSID values remain redacted without that grant.
+Ad-hoc signatures have no durable Apple identity, so installing a newly built app may require
+granting Location Services again.
+
+Native and Streamlit versions read and write the same version-1 `.wifisurvey` files. Those archives
+contain the original floor plan, calibration endpoints and scale, sample points, and Wi-Fi readings.
 
 ## Development
 
@@ -138,5 +147,5 @@ open "/path/to/WiFi Site Survey.app"
 
 ## Data and privacy
 
-Survey data stays in the Streamlit session until downloaded as CSV. The app does
-not upload floor plans or Wi-Fi measurements anywhere.
+Survey data stays local. It remains in memory unless exported as CSV or saved as a `.wifisurvey`
+archive; neither frontend uploads floor plans or Wi-Fi measurements anywhere.

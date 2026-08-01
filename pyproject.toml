@@ -14,7 +14,7 @@ dependencies = [
   "numpy>=1.26,<3",
   "pandas>=2.0,<3",
   "pillow>=10,<12",
-  "pyside6>=6.8,<7",
+  "pyside6>=6.8,<6.10",
   "plotly>=5.20,<7",
   "streamlit>=1.35,<2",
   "streamlit-plotly-events>=0.0.6,<1",
@@ -51,7 +51,7 @@ py-modules = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "--strict-markers --cov=wifi_site_survey --cov-report=term-missing --cov-fail-under=80"
+addopts = "--strict-markers --cov=survey_core --cov=native_wifi_mapper --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
 
 [tool.ruff]

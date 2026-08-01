@@ -49,7 +49,9 @@ def _json_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             if isinstance(value, float) and not np.isfinite(value):
                 value = None
             record[key] = (
-                value if value is None or isinstance(value, (str, int, float, bool)) else str(value)
+                value
+                if value is None or isinstance(value, str | int | float | bool)
+                else str(value)
             )
         records.append(record)
     return records
@@ -160,7 +162,7 @@ class SurveyDocument:
             )
             or (
                 scale is not None
-                and (isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale <= 0)
+                and (isinstance(scale, bool) or not isinstance(scale, int | float) or scale <= 0)
             )
         ):
             raise ValueError("Survey metadata is invalid.")
@@ -172,6 +174,38 @@ class SurveyDocument:
             points=points,
             measurements=measurements,
         )
+
+
+def save_survey(
+    image_bytes: bytes,
+    image_name: str,
+    calibration_points: list[tuple[float, float]],
+    meters_per_unit: float | None,
+    points: Iterable[dict[str, Any]],
+    measurements: Iterable[dict[str, Any]],
+) -> bytes:
+    """Serialize a survey through the shared versioned document model."""
+    return SurveyDocument(
+        image_bytes=image_bytes,
+        image_name=image_name,
+        calibration_points=calibration_points,
+        meters_per_unit=meters_per_unit,
+        points=list(points),
+        measurements=list(measurements),
+    ).to_bytes()
+
+
+def load_survey(data: bytes) -> dict[str, Any]:
+    """Load a survey into the dictionary shape used by the Streamlit UI."""
+    document = SurveyDocument.from_bytes(data)
+    return {
+        "image_bytes": document.image_bytes,
+        "image_name": document.image_name,
+        "calibration_points": document.calibration_points,
+        "meters_per_unit": document.meters_per_unit,
+        "points": document.points,
+        "measurements": document.measurements,
+    }
 
 
 def measurement_frame(rows: Iterable[dict[str, Any]]) -> pd.DataFrame:
@@ -187,8 +221,10 @@ def calibration_scale(
     start: tuple[float, float], end: tuple[float, float], distance_m: float
 ) -> float:
     coordinate_distance = float(np.linalg.norm(np.asarray(end) - np.asarray(start)))
-    if coordinate_distance <= 0 or distance_m <= 0:
-        raise ValueError("Calibration points and distance must define a positive line.")
+    if coordinate_distance <= 0:
+        raise ValueError("Calibration points must be different.")
+    if distance_m <= 0:
+        raise ValueError("Calibration distance must be greater than zero.")
     return distance_m / coordinate_distance
 
 
@@ -217,7 +253,7 @@ def point_has_minimum_spacing(x: float, y: float, points: pd.DataFrame, scale: f
     return bool(np.all(distances * scale >= 1.0 - 1e-9))
 
 
-def triple_eligibility(measurements: pd.DataFrame, scale: float | None) -> pd.DataFrame:
+def triple_eligibility(measurements: pd.DataFrame, scale: float | None = None) -> pd.DataFrame:
     columns = [*TRIPLE_COLUMNS, "sample_count", "eligible", "reason"]
     records = []
     for triple, group in measurements.groupby(TRIPLE_COLUMNS, dropna=False, sort=True):
@@ -274,8 +310,14 @@ def _convex_hull(points: np.ndarray) -> np.ndarray:
 
 
 def interpolate_rssi(
-    coordinates: np.ndarray, values: np.ndarray, x_axis: np.ndarray, y_axis: np.ndarray
+    coordinates: np.ndarray,
+    values: np.ndarray,
+    x_axis: np.ndarray,
+    y_axis: np.ndarray | None = None,
+    power: float = 2.0,
 ) -> np.ndarray:
+    if y_axis is None:
+        y_axis = x_axis
     grid_x, grid_y = np.meshgrid(x_axis, y_axis)
     if not has_spatial_spread(coordinates):
         return np.full_like(grid_x, np.nan)
@@ -283,7 +325,7 @@ def interpolate_rssi(
         grid_y[..., None] - coordinates[:, 1]
     ) ** 2
     exact, safe = distance2 <= 1e-12, np.maximum(distance2, 1e-12)
-    weights = 1.0 / safe
+    weights = 1.0 / np.power(safe, power / 2.0)
     surface = np.sum(weights * values, axis=2) / np.sum(weights, axis=2)
     cells, indices = exact.any(axis=2), exact.argmax(axis=2)
     surface[cells] = values[indices[cells]]
@@ -297,7 +339,10 @@ def interpolate_rssi(
 
 
 def heatmap_surface(
-    measurements: pd.DataFrame, triples: list[Triple], resolution: int, y_max: float
+    measurements: pd.DataFrame,
+    triples: list[Triple],
+    resolution: int = 101,
+    y_max: float = 100.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     x_axis = np.linspace(0, 100, resolution)
     y_axis = np.linspace(0, y_max, max(2, round(resolution * y_max / 100)))

@@ -1,17 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onedir recipe for the native PySide6 macOS application."""
 
-from PyInstaller.utils.hooks import collect_all
-
-
-pyside_datas, pyside_binaries, pyside_hidden = collect_all("PySide6")
-
 a = Analysis(
     ["native_wifi_mapper.py"],
     pathex=[],
-    binaries=pyside_binaries,
-    datas=[("THIRD_PARTY_NOTICES.md", "."), *pyside_datas],
-    hiddenimports=[*pyside_hidden, "objc", "CoreWLAN", "CoreLocation", "AppKit"],
+    binaries=[],
+    datas=[
+        ("THIRD_PARTY_NOTICES.md", "."),
+        ("LICENSES/GPL-3.0-only.txt", "LICENSES"),
+        ("LICENSES/LGPL-3.0-only.txt", "LICENSES"),
+    ],
+    hiddenimports=["objc", "CoreWLAN", "CoreLocation", "AppKit"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

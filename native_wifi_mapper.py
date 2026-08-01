@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QObject, QPointF, QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QPointF, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -61,17 +61,51 @@ class MapView(QGraphicsView):
         )
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self._y_max = 100.0
+        self._pan_position: QPoint | None = None
 
     def set_y_max(self, value: float) -> None:
         self._y_max = value
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() in {Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton}:
+            self._pan_position = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             point = self.mapToScene(event.position().toPoint())
+            if any(
+                item.flags() & item.GraphicsItemFlag.ItemIsSelectable
+                for item in self.scene().items(point)
+            ):
+                super().mousePressEvent(event)
+                return
             if 0 <= point.x() <= 100 and 0 <= point.y() <= self._y_max:
                 self.map_clicked.emit(point.x(), self._y_max - point.y())
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pan_position is not None:
+            position = event.position().toPoint()
+            delta = position - self._pan_position
+            self._pan_position = position
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._pan_position is not None and event.button() in {
+            Qt.MouseButton.MiddleButton,
+            Qt.MouseButton.RightButton,
+        }:
+            self._pan_position = None
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
@@ -99,6 +133,33 @@ class ScanWorker(QRunnable):
             self.signals.failed.emit(str(exc))
 
 
+class HeatmapSignals(QObject):
+    finished = Signal(int, object)
+
+
+class HeatmapWorker(QRunnable):
+    """Compute an RSSI surface without blocking Qt's GUI thread."""
+
+    def __init__(
+        self,
+        generation: int,
+        frame: pd.DataFrame,
+        triples: list[tuple[str, str, str]],
+        y_max: float,
+    ) -> None:
+        super().__init__()
+        self.generation = generation
+        self.frame = frame
+        self.triples = triples
+        self.y_max = y_max
+        self.signals = HeatmapSignals()
+
+    @Slot()
+    def run(self) -> None:
+        _, _, surface = heatmap_surface(self.frame, self.triples, 151, self.y_max)
+        self.signals.finished.emit(self.generation, surface)
+
+
 class SurveyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -108,6 +169,8 @@ class SurveyWindow(QMainWindow):
         self.pending_scan: tuple[float, float] | None = None
         self.location_manager = None
         self.thread_pool = QThreadPool.globalInstance()
+        self.heatmap_generation = 0
+        self.heatmap_surface_data: np.ndarray | None = None
         self.scene = QGraphicsScene(self)
         self.map_view = MapView()
         self.map_view.setScene(self.scene)
@@ -177,7 +240,7 @@ class SurveyWindow(QMainWindow):
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(10, 90)
         self.opacity.setValue(55)
-        self.opacity.valueChanged.connect(self.refresh_heatmap)
+        self.opacity.valueChanged.connect(self.render_cached_heatmap)
         filter_layout.addRow("Opacity", self.opacity)
         layout.addWidget(filters)
         self.delete_button = QPushButton("Delete selected map point")
@@ -420,6 +483,9 @@ class SurveyWindow(QMainWindow):
     def refresh_heatmap(self) -> None:
         if not self.document:
             return
+        self.heatmap_generation += 1
+        generation = self.heatmap_generation
+        self.heatmap_surface_data = None
         for item in self.scene.items():
             if item.data(1) == "heatmap":
                 self.scene.removeItem(item)
@@ -431,7 +497,24 @@ class SurveyWindow(QMainWindow):
             self.selected_values(self.bssid_list),
             self.selected_values(self.band_list),
         )
-        _, _, surface = heatmap_surface(frame, triples, 151, self.document.y_max)
+        if not triples:
+            self.heatmap_surface_data = None
+            return
+        worker = HeatmapWorker(generation, frame, triples, self.document.y_max)
+        worker.signals.finished.connect(self.heatmap_finished)
+        self.thread_pool.start(worker)
+
+    def heatmap_finished(self, generation: int, surface: object) -> None:
+        if generation != self.heatmap_generation or not self.document:
+            return
+        self.heatmap_surface_data = surface
+        self.render_cached_heatmap()
+
+    def render_cached_heatmap(self) -> None:
+        for item in self.scene.items():
+            if item.data(1) == "heatmap":
+                self.scene.removeItem(item)
+        surface = self.heatmap_surface_data
         if surface is None:
             return
         normalized = np.clip((surface - RSSI_MIN) / (RSSI_MAX - RSSI_MIN), 0, 1)

@@ -31,6 +31,8 @@ import streamlit as st
 from PIL import Image
 from streamlit_plotly_events import plotly_events
 
+import survey_core as core
+
 MEASUREMENT_COLUMNS = [
     "point_id",
     "x",
@@ -221,7 +223,7 @@ def _json_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 value = value.item()
             if isinstance(value, float) and not np.isfinite(value):
                 value = None
-            if value is None or isinstance(value, (str, int, float, bool)):
+            if value is None or isinstance(value, str | int | float | bool):
                 record[key] = value
             else:
                 record[key] = str(value)
@@ -291,7 +293,7 @@ def load_survey(data: bytes) -> dict[str, Any]:
             not isinstance(measurement, dict) or not set(MEASUREMENT_COLUMNS).issubset(measurement)
             for measurement in measurements
         )
-        or (scale is not None and (not isinstance(scale, (int, float)) or scale <= 0))
+        or (scale is not None and (not isinstance(scale, int | float) or scale <= 0))
     ):
         raise ValueError("Survey metadata is invalid.")
     try:
@@ -586,6 +588,20 @@ def heatmap_surface(
     return grid_x_axis, grid_y_axis, combine_surfaces(surfaces)
 
 
+# Keep both frontends on one persistence and heatmap implementation. These aliases
+# deliberately follow the legacy definitions so existing imports remain compatible.
+save_survey = core.save_survey  # noqa: F811
+load_survey = core.load_survey  # noqa: F811
+measurement_frame = core.measurement_frame  # noqa: F811
+calibration_scale = core.calibration_scale  # noqa: F811
+spaced_coordinates = core.spaced_coordinates  # noqa: F811
+point_has_minimum_spacing = core.point_has_minimum_spacing  # noqa: F811
+triple_eligibility = core.triple_eligibility  # noqa: F811
+select_eligible_triples = core.select_eligible_triples  # noqa: F811
+interpolate_rssi = core.interpolate_rssi  # noqa: F811
+heatmap_surface = core.heatmap_surface  # noqa: F811
+
+
 def image_y_max(image: Image.Image) -> float:
     """Return the image height in isotropic width-normalized map coordinates."""
     return 100.0 * image.height / image.width
@@ -603,7 +619,7 @@ def click_coordinates(
     if "x" in click and "y" in click:
         return float(click["x"]), float(click["y"])
     point_number = click.get("pointNumber")
-    if isinstance(point_number, (list, tuple)) and len(point_number) == 2:
+    if isinstance(point_number, list | tuple) and len(point_number) == 2:
         row, column = map(int, point_number)
         return float(x_axis[column]), float(y_axis[row])
     raise ValueError("The map click did not include usable coordinates. Please click again.")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import sys
 from typing import Any
 
 LOCATION_AUTHORIZED = {3, 4}
@@ -36,6 +37,13 @@ def request_location_authorization() -> tuple[int | None, Any | None]:
     status, manager = location_authorization()
     if manager is None or status != 0:
         return status, manager
+    if getattr(sys, "frozen", False):
+        try:
+            from AppKit import NSApplication
+
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        except ImportError:
+            pass
     manager.requestWhenInUseAuthorization()
     return status, manager
 
