@@ -86,6 +86,20 @@ uv run streamlit run wifi_site_survey.py
 Live scanning only works on macOS. The UI and automated tests can run on other
 platforms, where scan attempts return a clear error.
 
+### Native PySide6 application (development branch)
+
+The `native-pyside6` branch contains a browser-free Qt Widgets implementation. It keeps the floor
+plan and overlay layers resident, performs CoreWLAN scans in a worker thread, and reads the same
+version-1 `.wifisurvey` files as the Streamlit application.
+
+```bash
+uv sync --all-extras --locked
+uv run wifi-site-survey-native
+```
+
+PySide6 is distributed under LGPLv3/GPLv3 or commercial terms. This project uses dynamically
+linked Qt libraries under LGPLv3; release bundles must retain the applicable Qt license notices.
+
 ## Development
 
 ```bash
