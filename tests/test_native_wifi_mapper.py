@@ -30,6 +30,9 @@ def test_map_preserves_aspect_and_calibrates(qtbot) -> None:
     window.rebuild_scene()
     assert window.scene.sceneRect().width() == 100
     assert window.scene.sceneRect().height() == 50
+    background = min(window.scene.items(), key=lambda item: item.zValue())
+    assert background.pixmap().width() == 200
+    assert background.scale() == 0.5
 
     window.map_clicked(10, 10)
     window.map_clicked(30, 10)

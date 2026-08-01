@@ -50,6 +50,8 @@ from survey_core import (
     triple_eligibility,
 )
 
+NATIVE_HEATMAP_RESOLUTION = 755
+
 
 class MapView(QGraphicsView):
     map_clicked = Signal(float, float)
@@ -156,7 +158,9 @@ class HeatmapWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
-        _, _, surface = heatmap_surface(self.frame, self.triples, 151, self.y_max)
+        _, _, surface = heatmap_surface(
+            self.frame, self.triples, NATIVE_HEATMAP_RESOLUTION, self.y_max
+        )
         self.signals.finished.emit(self.generation, surface)
 
 
@@ -395,10 +399,11 @@ class SurveyWindow(QMainWindow):
         rgba = image.convert("RGBA")
         data = rgba.tobytes("raw", "RGBA")
         qimage = QImage(data, rgba.width, rgba.height, QImage.Format.Format_RGBA8888).copy()
-        pixmap = QPixmap.fromImage(qimage).scaledToWidth(
-            100, Qt.TransformationMode.SmoothTransformation
-        )
+        # Scene units are independent from raster pixels. Keep every source pixel
+        # resident and scale the graphics item into the 100-unit map coordinate space.
+        pixmap = QPixmap.fromImage(qimage)
         background = self.scene.addPixmap(pixmap)
+        background.setScale(100.0 / pixmap.width())
         background.setZValue(0)
         self.scene.setSceneRect(0, 0, 100, self.document.y_max)
         self.map_view.set_y_max(self.document.y_max)
