@@ -92,6 +92,12 @@ The `native-pyside6` branch contains a browser-free Qt Widgets implementation. I
 plan and overlay layers resident, performs CoreWLAN scans in a worker thread, and reads the same
 version-1 `.wifisurvey` files as the Streamlit application.
 
+The native workflow has two stages. Opening a floor plan first presents a mandatory calibration
+dialog: select two endpoints of a known distance and enter its length in metres. Cancelling this
+initial dialog unloads the image, because sampling is unavailable until setup is complete. Once
+calibrated, the compact **Recalibrate…** action reopens the dialog without changing the active
+survey unless the new calibration is accepted.
+
 ```bash
 uv sync --all-extras --locked
 uv run wifi-site-survey-native

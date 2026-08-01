@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import copy
 import io
 
 from PIL import Image
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QGraphicsLineItem
 
-from native_wifi_mapper import SAMPLE_MARKER_DIAMETER, HeatmapWorker, ScanWorker, SurveyWindow
+from native_wifi_mapper import (
+    SAMPLE_MARKER_DIAMETER,
+    CalibrationDialog,
+    HeatmapWorker,
+    ScanWorker,
+    SurveyWindow,
+)
 from survey_core import SurveyDocument, measurement_frame
 
 
@@ -23,10 +31,12 @@ def test_native_window_constructs_and_closes(qtbot) -> None:
     assert not window.isVisible()
 
 
-def test_map_preserves_aspect_and_calibrates(qtbot) -> None:
+def test_map_preserves_aspect(qtbot) -> None:
     window = SurveyWindow()
     qtbot.addWidget(window)
     window.document = document()
+    window.document.calibration_points = [(10, 10), (30, 10)]
+    window.document.meters_per_unit = 0.5
     window.rebuild_scene()
     assert window.scene.sceneRect().width() == 100
     assert window.scene.sceneRect().height() == 50
@@ -34,11 +44,193 @@ def test_map_preserves_aspect_and_calibrates(qtbot) -> None:
     assert background.pixmap().width() == 200
     assert background.scale() == 0.5
 
-    window.map_clicked(10, 10)
-    window.map_clicked(30, 10)
-    window.distance_spin.setValue(10)
-    window.apply_calibration()
+
+def test_calibration_dialog_draws_points_and_line_and_accepts(qtbot) -> None:
+    dialog = CalibrationDialog(document())
+    qtbot.addWidget(dialog)
+    ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert not ok.isEnabled()
+    background = min(dialog.scene.items(), key=lambda item: item.zValue())
+
+    dialog.map_clicked(10, 10)
+    dialog.map_clicked(30, 10)
+    dialog.distance_spin.setValue(10)
+    assert ok.isEnabled()
+    assert sum(isinstance(item, QGraphicsLineItem) for item in dialog.scene.items()) == 1
+    assert background in dialog.scene.items()
+    assert dialog.meters_per_unit == 0.5
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+class FakeCalibrationDialog:
+    def __init__(self, accepted: bool) -> None:
+        self.result = QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+        self.calibration_points = [(10.0, 10.0), (30.0, 10.0)]
+        self.meters_per_unit = 0.5
+
+    def exec(self) -> QDialog.DialogCode:
+        return self.result
+
+
+def test_open_image_forces_calibration_and_cancel_unloads(monkeypatch, qtbot, tmp_path) -> None:
+    path = tmp_path / "floor.png"
+    path.write_bytes(document().image_bytes)
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "native_wifi_mapper.QFileDialog.getOpenFileName", lambda *args: (str(path), "")
+    )
+    monkeypatch.setattr(
+        window, "create_calibration_dialog", lambda candidate: FakeCalibrationDialog(False)
+    )
+
+    window.open_image()
+    assert window.document is None
+    assert not window.map_view.isEnabled()
+    assert "Stage 1" in window.calibration_status.text()
+
+
+def test_open_image_acceptance_enters_sampling_stage(monkeypatch, qtbot, tmp_path) -> None:
+    path = tmp_path / "floor.png"
+    path.write_bytes(document().image_bytes)
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "native_wifi_mapper.QFileDialog.getOpenFileName", lambda *args: (str(path), "")
+    )
+    monkeypatch.setattr(
+        window, "create_calibration_dialog", lambda candidate: FakeCalibrationDialog(True)
+    )
+
+    window.open_image()
+    assert window.document is not None
     assert window.document.meters_per_unit == 0.5
+    assert window.map_view.isEnabled()
+    assert "Calibrated" in window.calibration_status.text()
+
+
+def test_cancelled_recalibration_preserves_active_survey(monkeypatch, qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    survey = document()
+    survey.calibration_points = [(0.0, 0.0), (10.0, 0.0)]
+    survey.meters_per_unit = 0.25
+    survey.add_measurement(
+        5,
+        5,
+        [{"ssid": "Home", "bssid": "AA", "band": "5 GHz", "rssi_dbm": -50, "channel": 44}],
+    )
+    window.activate_document(survey)
+    before = copy.deepcopy(
+        (survey.calibration_points, survey.meters_per_unit, survey.points, survey.measurements)
+    )
+    monkeypatch.setattr(
+        window, "create_calibration_dialog", lambda candidate: FakeCalibrationDialog(False)
+    )
+
+    window.recalibrate()
+    assert window.document is survey
+    assert (
+        survey.calibration_points,
+        survey.meters_per_unit,
+        survey.points,
+        survey.measurements,
+    ) == before
+
+
+def test_successful_recalibration_updates_scale_without_losing_samples(monkeypatch, qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    survey = document()
+    survey.calibration_points = [(0.0, 0.0), (10.0, 0.0)]
+    survey.meters_per_unit = 0.25
+    survey.add_measurement(
+        5,
+        5,
+        [
+            {
+                "ssid": "Home",
+                "bssid": "AA",
+                "band": "5 GHz",
+                "rssi_dbm": -50,
+                "channel": 44,
+            }
+        ],
+    )
+    window.activate_document(survey)
+    points_before = copy.deepcopy(survey.points)
+    measurements_before = copy.deepcopy(survey.measurements)
+    monkeypatch.setattr(
+        window, "create_calibration_dialog", lambda candidate: FakeCalibrationDialog(True)
+    )
+
+    window.recalibrate()
+    assert survey.calibration_points == [(10.0, 10.0), (30.0, 10.0)]
+    assert survey.meters_per_unit == 0.5
+    assert survey.points == points_before
+    assert survey.measurements == measurements_before
+
+
+def test_calibrated_survey_loads_without_dialog(monkeypatch, qtbot, tmp_path) -> None:
+    survey = document()
+    survey.calibration_points = [(0.0, 0.0), (10.0, 0.0)]
+    survey.meters_per_unit = 0.5
+    path = tmp_path / "ready.wifisurvey"
+    path.write_bytes(survey.to_bytes())
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "native_wifi_mapper.QFileDialog.getOpenFileName", lambda *args: (str(path), "")
+    )
+    monkeypatch.setattr(
+        window,
+        "create_calibration_dialog",
+        lambda candidate: (_ for _ in ()).throw(AssertionError("dialog should not open")),
+    )
+
+    window.open_survey()
+    assert window.document is not None
+    assert window.map_view.isEnabled()
+
+
+def test_uncalibrated_survey_requires_dialog_and_cancel_unloads(
+    monkeypatch, qtbot, tmp_path
+) -> None:
+    path = tmp_path / "uncalibrated.wifisurvey"
+    path.write_bytes(document().to_bytes())
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "native_wifi_mapper.QFileDialog.getOpenFileName", lambda *args: (str(path), "")
+    )
+    monkeypatch.setattr(
+        window, "create_calibration_dialog", lambda candidate: FakeCalibrationDialog(False)
+    )
+
+    window.open_survey()
+    assert window.document is None
+    assert not window.map_view.isEnabled()
+
+
+def test_sampling_is_blocked_before_calibration(qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    window.document = document()
+    window.map_clicked(10, 10)
+    assert window.pending_scan is None
+    assert "Complete stage 1" in window.statusBar().currentMessage()
+
+
+def test_coincident_calibration_endpoints_do_not_unlock_sampling(qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    survey = document()
+    survey.calibration_points = [(10.0, 10.0), (10.0, 10.0)]
+    survey.meters_per_unit = 1.0
+    window.document = survey
+    window.update_stage_ui()
+    assert not window.map_view.isEnabled()
 
 
 def test_numbered_marker_is_visible_and_selectable(qtbot) -> None:

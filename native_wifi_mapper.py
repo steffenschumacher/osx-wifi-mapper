@@ -22,6 +22,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
@@ -53,6 +55,7 @@ from survey_core import (
     RSSI_MAX,
     RSSI_MIN,
     SurveyDocument,
+    calibration_scale,
     heatmap_surface,
     measurement_frame,
     point_has_minimum_spacing,
@@ -151,6 +154,128 @@ class MapView(QGraphicsView):
         self.fitInView(0, 0, 100, self._y_max, Qt.AspectRatioMode.KeepAspectRatio)
 
 
+class CalibrationDialog(QDialog):
+    """Modal two-point distance calibration editor for a floor plan."""
+
+    def __init__(self, document: SurveyDocument, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Floor Plan Calibration")
+        self.resize(900, 650)
+        self.document = document
+        self.calibration_points = list(document.calibration_points)
+        self.meters_per_unit: float | None = None
+
+        layout = QVBoxLayout(self)
+        instructions = QLabel(
+            "Click two endpoints of a known straight-line distance, then enter its real length."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        self.scene = QGraphicsScene(self)
+        self.map_view = MapView()
+        self.map_view.setScene(self.scene)
+        self.map_view.set_y_max(document.y_max)
+        self.map_view.map_clicked.connect(self.map_clicked)
+        layout.addWidget(self.map_view, 1)
+        form = QFormLayout()
+        self.distance_spin = QDoubleSpinBox()
+        self.distance_spin.setRange(0.01, 100000)
+        existing_distance = self._existing_distance()
+        self.distance_spin.setValue(existing_distance if existing_distance else 1.0)
+        self.distance_spin.setSuffix(" m")
+        self.distance_spin.valueChanged.connect(self.update_scale_preview)
+        self.status_label = QLabel()
+        form.addRow("Reference distance", self.distance_spin)
+        form.addRow("Calculated scale", self.status_label)
+        layout.addLayout(form)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._initialize_scene()
+
+    def _existing_distance(self) -> float | None:
+        if len(self.calibration_points) != 2 or not self.document.meters_per_unit:
+            return None
+        coordinate_distance = float(
+            np.linalg.norm(
+                np.asarray(self.calibration_points[1]) - np.asarray(self.calibration_points[0])
+            )
+        )
+        return coordinate_distance * self.document.meters_per_unit
+
+    def map_clicked(self, x: float, y: float) -> None:
+        if len(self.calibration_points) == 2:
+            self.calibration_points.clear()
+        self.calibration_points.append((x, y))
+        self._draw_alignment()
+
+    def _initialize_scene(self) -> None:
+        image = self.document.image.convert("RGBA")
+        data = image.tobytes("raw", "RGBA")
+        qimage = QImage(data, image.width, image.height, QImage.Format.Format_RGBA8888).copy()
+        pixmap = QPixmap.fromImage(qimage)
+        background = self.scene.addPixmap(pixmap)
+        background.setScale(100.0 / pixmap.width())
+        self.scene.setSceneRect(0, 0, 100, self.document.y_max)
+        self._draw_alignment()
+        self.map_view.fit_map()
+
+    def _draw_alignment(self) -> None:
+        for item in self.scene.items():
+            if item.data(0) == "calibration-overlay":
+                self.scene.removeItem(item)
+        points = [QPointF(x, self.document.y_max - y) for x, y in self.calibration_points]
+        if len(points) == 2:
+            line = self.scene.addLine(
+                points[0].x(),
+                points[0].y(),
+                points[1].x(),
+                points[1].y(),
+                QPen(QColor("#7c3aed"), 0.8),
+            )
+            line.setData(0, "calibration-overlay")
+            line.setZValue(2)
+        for point in points:
+            marker = self.scene.addEllipse(
+                point.x() - 1,
+                point.y() - 1,
+                2,
+                2,
+                QPen(QColor("white"), 0.3),
+                QColor("#7c3aed"),
+            )
+            marker.setData(0, "calibration-overlay")
+            marker.setZValue(3)
+        self.update_scale_preview()
+
+    def update_scale_preview(self) -> None:
+        valid = len(self.calibration_points) == 2
+        self.meters_per_unit = None
+        if valid:
+            try:
+                self.meters_per_unit = calibration_scale(
+                    *self.calibration_points, self.distance_spin.value()
+                )
+            except ValueError:
+                valid = False
+        self.status_label.setText(
+            f"{self.meters_per_unit:.6g} metres per coordinate unit"
+            if self.meters_per_unit is not None
+            else f"Select endpoint {len(self.calibration_points) + 1}"
+            if len(self.calibration_points) < 2
+            else "Endpoints must be different"
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(valid)
+
+    def accept(self) -> None:
+        self.update_scale_preview()
+        if self.meters_per_unit is not None:
+            super().accept()
+
+
 class WorkerSignals(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
@@ -223,6 +348,7 @@ class SurveyWindow(QMainWindow):
         self.scan_banner.hide()
         self.statusBar().showMessage("Open a floor plan or saved survey to begin")
         self.refresh_location()
+        self.update_stage_ui()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -276,23 +402,13 @@ class SurveyWindow(QMainWindow):
         self.location_button.clicked.connect(self.request_location)
         layout.addWidget(self.location_label)
         layout.addWidget(self.location_button)
-        calibration = QGroupBox("Distance calibration")
-        form = QFormLayout(calibration)
-        self.calibration_label = QLabel("Open a floor plan")
-        self.distance_spin = QDoubleSpinBox()
-        self.distance_spin.setRange(0.01, 100000)
-        self.distance_spin.setValue(1)
-        self.distance_spin.setSuffix(" m")
-        self.apply_calibration_button = QPushButton("Apply calibration")
-        self.apply_calibration_button.clicked.connect(self.apply_calibration)
-        self.recalibrate_button = QPushButton("Recalibrate")
+        self.calibration_status = QLabel("No calibrated floor plan")
+        self.recalibrate_button = QPushButton("Recalibrate…")
         self.recalibrate_button.clicked.connect(self.recalibrate)
-        form.addRow(self.calibration_label)
-        form.addRow("Reference distance", self.distance_spin)
-        form.addRow(self.apply_calibration_button)
-        form.addRow(self.recalibrate_button)
-        layout.addWidget(calibration)
+        layout.addWidget(self.calibration_status)
+        layout.addWidget(self.recalibrate_button)
         filters = QGroupBox("Heatmap filters (none selected = all)")
+        self.filters_group = filters
         filter_layout = QFormLayout(filters)
         self.ssid_list, self.bssid_list, self.band_list = (
             QListWidget(),
@@ -333,9 +449,9 @@ class SurveyWindow(QMainWindow):
             self, "Open Floor Plan", "", "Images (*.png *.jpg *.jpeg)"
         )
         if path:
-            self.document = SurveyDocument(Path(path).read_bytes(), Path(path).name)
-            self.rebuild_scene()
-            self.refresh_filters()
+            candidate = SurveyDocument(Path(path).read_bytes(), Path(path).name)
+            self.clear_document()
+            self.configure_calibration(candidate, initial=True)
 
     def open_survey(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -344,12 +460,79 @@ class SurveyWindow(QMainWindow):
         if not path:
             return
         try:
-            self.document = SurveyDocument.from_bytes(Path(path).read_bytes())
-            self.rebuild_scene()
-            self.refresh_filters()
-            self.statusBar().showMessage(f"Loaded {len(self.document.points)} points")
+            candidate = SurveyDocument.from_bytes(Path(path).read_bytes())
+            if self.document_is_calibrated(candidate):
+                self.activate_document(candidate)
+            else:
+                self.clear_document()
+                self.configure_calibration(candidate, initial=True)
         except ValueError as exc:
             QMessageBox.critical(self, "Invalid survey", str(exc))
+
+    def create_calibration_dialog(self, document: SurveyDocument) -> CalibrationDialog:
+        return CalibrationDialog(document, self)
+
+    @staticmethod
+    def document_is_calibrated(document: SurveyDocument | None) -> bool:
+        if (
+            not document
+            or len(document.calibration_points) != 2
+            or document.meters_per_unit is None
+            or not np.isfinite(document.meters_per_unit)
+            or document.meters_per_unit <= 0
+        ):
+            return False
+        return bool(
+            np.linalg.norm(
+                np.asarray(document.calibration_points[1])
+                - np.asarray(document.calibration_points[0])
+            )
+            > 1e-9
+        )
+
+    def configure_calibration(self, document: SurveyDocument, initial: bool) -> bool:
+        dialog = self.create_calibration_dialog(document)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            if initial:
+                self.clear_document()
+            return False
+        document.calibration_points = list(dialog.calibration_points)
+        document.meters_per_unit = dialog.meters_per_unit
+        self.activate_document(document)
+        return True
+
+    def activate_document(self, document: SurveyDocument) -> None:
+        self.document = document
+        self.rebuild_scene()
+        self.refresh_filters()
+        self.update_stage_ui()
+        self.statusBar().showMessage(
+            f"Sampling stage ready — loaded {len(document.points)} existing points"
+        )
+
+    def clear_document(self) -> None:
+        self.document = None
+        self.pending_scan = None
+        self.scene.clear()
+        self.heatmap_surface_data = None
+        for widget in (self.ssid_list, self.bssid_list, self.band_list):
+            widget.clear()
+        self.update_stage_ui()
+        self.statusBar().showMessage(
+            "Stage 1 of 2: open a floor plan and complete distance calibration"
+        )
+
+    def update_stage_ui(self) -> None:
+        ready = self.document_is_calibrated(self.document)
+        self.map_view.setEnabled(ready)
+        self.recalibrate_button.setEnabled(ready)
+        self.filters_group.setEnabled(ready)
+        self.delete_button.setEnabled(ready)
+        self.calibration_status.setText(
+            f"Calibrated: {self.document.meters_per_unit:.6g} m/unit"
+            if ready and self.document
+            else "Stage 1: floor plan and calibration required"
+        )
 
     def save_survey(self) -> None:
         if not self.document:
@@ -372,16 +555,16 @@ class SurveyWindow(QMainWindow):
             )
 
     def map_clicked(self, x: float, y: float) -> None:
-        if not self.document:
+        if not self.document_is_calibrated(self.document):
+            self.statusBar().showMessage(
+                "Complete stage 1 (floor plan and calibration) before sampling"
+            )
             return
-        if self.document.meters_per_unit is None:
-            if len(self.document.calibration_points) >= 2:
-                self.document.calibration_points.clear()
-            self.document.calibration_points.append((x, y))
-            self.rebuild_scene()
+        document = self.document
+        if document is None or document.meters_per_unit is None:
             return
-        points = pd.DataFrame(self.document.points)
-        if not point_has_minimum_spacing(x, y, points, self.document.meters_per_unit):
+        points = pd.DataFrame(document.points)
+        if not point_has_minimum_spacing(x, y, points, document.meters_per_unit):
             self.statusBar().showMessage("Measurement points must be at least one metre apart")
             return
         self.pending_scan = (x, y)
@@ -424,22 +607,9 @@ class SurveyWindow(QMainWindow):
         self.menuBar().setEnabled(enabled)
         self.control_dock.setEnabled(enabled)
 
-    def apply_calibration(self) -> None:
-        if self.document and len(self.document.calibration_points) == 2:
-            from survey_core import calibration_scale
-
-            self.document.meters_per_unit = calibration_scale(
-                *self.document.calibration_points, self.distance_spin.value()
-            )
-            self.rebuild_scene()
-            self.refresh_filters()
-
     def recalibrate(self) -> None:
         if self.document:
-            self.document.calibration_points.clear()
-            self.document.meters_per_unit = None
-            self.rebuild_scene()
-            self.refresh_filters()
+            self.configure_calibration(self.document, initial=False)
 
     def selected_values(self, widget: QListWidget) -> list[str]:
         return [item.text() for item in widget.selectedItems()]
@@ -493,9 +663,6 @@ class SurveyWindow(QMainWindow):
     def draw_calibration(self) -> None:
         if not self.document:
             return
-        if not self.document.calibration_points:
-            self.calibration_label.setText("Click endpoint 1")
-            return
         points = [QPointF(x, self.document.y_max - y) for x, y in self.document.calibration_points]
         if len(points) == 2:
             line = self.scene.addLine(
@@ -511,14 +678,6 @@ class SurveyWindow(QMainWindow):
                 point.x() - 1, point.y() - 1, 2, 2, QPen(Qt.PenStyle.NoPen), QColor("#7c3aed")
             )
             marker.setZValue(4)
-        count = len(points)
-        self.calibration_label.setText(
-            "Calibrated"
-            if self.document.meters_per_unit
-            else f"Click endpoint {count + 1}"
-            if count < 2
-            else "Enter distance and apply"
-        )
 
     def draw_markers(self) -> None:
         if not self.document:
