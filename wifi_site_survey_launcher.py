@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import IO
 
 DEFAULT_PORT = 8501
 HEALTH_PATH = "/_stcore/health"
+INSTANCE_LOCK_PATH = Path(tempfile.gettempdir()) / "wifi-site-survey.lock"
+_instance_lock: IO[str] | None = None
 
 
 def bundled_app_path() -> Path:
@@ -32,6 +37,27 @@ def server_port() -> int:
             probe.bind(("127.0.0.1", 0))
             return int(probe.getsockname()[1])
     return configured
+
+
+def claim_single_instance() -> tuple[IO[str] | None, int | None]:
+    """Claim the application lock or return the existing instance's port."""
+    lock_file = INSTANCE_LOCK_PATH.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.seek(0)
+        value = lock_file.read().strip()
+        lock_file.close()
+        return None, int(value) if value.isdigit() else DEFAULT_PORT
+    return lock_file, None
+
+
+def record_instance_port(lock_file: IO[str], port: int) -> None:
+    """Publish the server port while retaining the process-owned file lock."""
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(port))
+    lock_file.flush()
 
 
 def open_browser_when_ready(port: int, timeout: float = 30.0) -> None:
@@ -53,10 +79,19 @@ def open_browser_when_ready(port: int, timeout: float = 30.0) -> None:
 
 def main() -> None:
     """Launch the bundled Streamlit application."""
-    from streamlit.web import cli as stcli
+    global _instance_lock
+
+    lock_file, existing_port = claim_single_instance()
+    if lock_file is None:
+        webbrowser.open(f"http://127.0.0.1:{existing_port}")
+        return
+    _instance_lock = lock_file
 
     os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
     port = server_port()
+    record_instance_port(lock_file, port)
+    from streamlit.web import cli as stcli
+
     if os.environ.get("WIFI_SITE_SURVEY_OPEN_BROWSER", "true").lower() not in {
         "0",
         "false",

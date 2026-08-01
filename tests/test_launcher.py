@@ -39,6 +39,8 @@ def test_browser_opens_only_after_server_is_healthy(monkeypatch) -> None:
 def test_main_forces_production_mode_and_matching_ports(monkeypatch) -> None:
     streamlit_cli = MagicMock()
     streamlit_cli.main.return_value = 0
+    lock_file = MagicMock()
+    monkeypatch.setattr(launcher, "claim_single_instance", lambda: (lock_file, None))
     monkeypatch.setattr(launcher, "server_port", lambda: 18765)
     monkeypatch.setenv("WIFI_SITE_SURVEY_OPEN_BROWSER", "false")
     monkeypatch.setattr("streamlit.web.cli.main", streamlit_cli.main)
@@ -53,3 +55,17 @@ def test_main_forces_production_mode_and_matching_ports(monkeypatch) -> None:
     assert "--server.address=127.0.0.1" in launcher.sys.argv
     assert "--server.port=18765" in launcher.sys.argv
     assert "--browser.serverPort=18765" in launcher.sys.argv
+    lock_file.write.assert_called_once_with("18765")
+
+
+def test_single_instance_lock_reports_existing_port(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(launcher, "INSTANCE_LOCK_PATH", tmp_path / "app.lock")
+    first, existing = launcher.claim_single_instance()
+    assert first is not None
+    assert existing is None
+    launcher.record_instance_port(first, 18765)
+
+    second, existing = launcher.claim_single_instance()
+    assert second is None
+    assert existing == 18765
+    first.close()

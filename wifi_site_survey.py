@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import html
 import io
+import os
 import platform
 import sys
 from collections.abc import Iterable
@@ -192,6 +193,12 @@ def initialize_state() -> None:
     st.session_state.setdefault("location_manager", None)
     st.session_state.setdefault("calibration_points", [])
     st.session_state.setdefault("meters_per_unit", None)
+    st.session_state.setdefault("last_map_click", None)
+
+
+def quit_application() -> None:
+    """Terminate the frozen browser-backed application immediately and reliably."""
+    os._exit(0)
 
 
 def add_measurement_point(x: float, y: float) -> tuple[int, int]:
@@ -670,6 +677,16 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
                         "Respond to the macOS permission dialog, then quit and reopen the app "
                         "before scanning."
                     )
+            elif getattr(sys, "frozen", False) and location_status == 2:
+                st.warning(
+                    "Location access is denied or belongs to an older ad-hoc-signed build. "
+                    "Quit the app, reset its saved decision in Terminal, then reopen it and "
+                    "request access again:"
+                )
+                st.code(
+                    "tccutil reset Location com.steffenschumacher.wifisitesurvey",
+                    language="bash",
+                )
             else:
                 st.warning(
                     "Open System Settings → Privacy & Security → Location Services and enable "
@@ -693,6 +710,7 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         st.session_state.next_point_id = 1
         st.session_state.calibration_points = []
         st.session_state.meters_per_unit = None
+        st.session_state.last_map_click = None
         st.session_state.map_revision += 1
 
     try:
@@ -707,6 +725,9 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
     eligibility = triple_eligibility(measurements, st.session_state.meters_per_unit)
     eligible = eligibility[eligibility["eligible"]]
     with st.sidebar:
+        if getattr(sys, "frozen", False) and st.button("Quit WiFi Site Survey", type="secondary"):
+            quit_application()
+
         st.header("Distance calibration")
         calibration_points = st.session_state.calibration_points
         if st.session_state.meters_per_unit is None:
@@ -794,11 +815,19 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         select_event=False,
         hover_event=False,
         override_height=plot_height,
-        key=f"survey-map-{st.session_state.map_revision}",
+        # Keep the component identity stable so its iframe and floor-plan image are not
+        # destroyed and recreated after every interaction.
+        key="survey-map",
     )
 
     if clicks:
         click = clicks[-1]
+        click_token = repr(click)
+        if click_token == st.session_state.last_map_click:
+            click = None
+        else:
+            st.session_state.last_map_click = click_token
+    if clicks and click is not None:
         try:
             click_x_axis = np.linspace(0.0, 100.0, 101)
             click_y_axis = np.linspace(0.0, y_max, max(2, round(y_max) + 1))

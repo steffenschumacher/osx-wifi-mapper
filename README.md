@@ -57,6 +57,14 @@ For the downloaded app:
    Services** and enable **WiFi Site Survey** manually.
 4. Quit WiFi Site Survey completely, reopen it, and scan again.
 
+These releases are ad-hoc signed, so macOS may treat an updated build as a new privacy identity and
+retain a stale Location Services decision. If a previously working update starts returning redacted
+SSID/BSSID values, quit it and reset only this app's Location authorization before reopening it:
+
+```bash
+tccutil reset Location com.steffenschumacher.wifisitesurvey
+```
+
 For source installations, enable Location Services for the application that starts Streamlit—such
 as Terminal, iTerm, VS Code, or your IDE—then quit and reopen that application. A scan is rejected
 instead of storing useless data when authorization is absent or macOS redacts every SSID/BSSID.
