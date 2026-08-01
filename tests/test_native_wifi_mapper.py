@@ -4,7 +4,7 @@ import io
 
 from PIL import Image
 
-from native_wifi_mapper import HeatmapWorker, ScanWorker, SurveyWindow
+from native_wifi_mapper import SAMPLE_MARKER_DIAMETER, HeatmapWorker, ScanWorker, SurveyWindow
 from survey_core import SurveyDocument, measurement_frame
 
 
@@ -56,6 +56,10 @@ def test_numbered_marker_is_visible_and_selectable(qtbot) -> None:
     assert len(markers) == 1
     assert markers[0].flags() & markers[0].GraphicsItemFlag.ItemIsSelectable
     assert "Home / AA / 5 GHz" in markers[0].toolTip()
+    assert markers[0].rect().width() == SAMPLE_MARKER_DIAMETER
+    assert not markers[0].number.isVisible()
+    markers[0].number.setVisible(True)
+    assert markers[0].number.isVisible()
 
 
 def test_scan_worker_reports_success(monkeypatch, qtbot) -> None:
@@ -129,3 +133,22 @@ def test_scan_failure_reenables_ui(monkeypatch, qtbot) -> None:
     monkeypatch.setattr("native_wifi_mapper.QMessageBox.warning", lambda *args: None)
     window.scan_failed("failure")
     assert window.map_view.isEnabled()
+    assert not window.scan_banner.isVisible()
+
+
+def test_scan_banner_blocks_then_announces_next_location(qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.document = document()
+    window.document.meters_per_unit = 1.0
+    window.pending_scan = (10, 10)
+    window.set_controls_enabled(False)
+    window.show_scan_banner("Scanning")
+    assert window.scan_banner.isVisible()
+    assert not window.map_view.isEnabled()
+
+    window.scan_succeeded([])
+    assert window.map_view.isEnabled()
+    assert window.scan_banner.isVisible()
+    assert "free to walk" in window.scan_banner.text()

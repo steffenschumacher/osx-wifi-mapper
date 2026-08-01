@@ -8,7 +8,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QObject, QPoint, QPointF, QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import (
+    QObject,
+    QPoint,
+    QPointF,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +61,30 @@ from survey_core import (
 )
 
 NATIVE_HEATMAP_RESOLUTION = 755
+SAMPLE_MARKER_DIAMETER = 0.72
+
+
+class SampleMarker(QGraphicsEllipseItem):
+    """Compact selectable marker whose number appears only while hovered."""
+
+    def __init__(self, x: float, y: float, point_id: int) -> None:
+        radius = SAMPLE_MARKER_DIAMETER / 2
+        super().__init__(x - radius, y - radius, SAMPLE_MARKER_DIAMETER, SAMPLE_MARKER_DIAMETER)
+        self.setAcceptHoverEvents(True)
+        self.number = QGraphicsSimpleTextItem(str(point_id), self)
+        self.number.setBrush(QColor("white"))
+        self.number.setScale(0.12)
+        self.number.setPos(x - 0.7, y - 0.9)
+        self.number.setZValue(1)
+        self.number.setVisible(False)
+
+    def hoverEnterEvent(self, event) -> None:  # noqa: N802
+        self.number.setVisible(True)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:  # noqa: N802
+        self.number.setVisible(False)
+        super().hoverLeaveEvent(event)
 
 
 class MapView(QGraphicsView):
@@ -175,6 +209,7 @@ class SurveyWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.heatmap_generation = 0
         self.heatmap_surface_data: np.ndarray | None = None
+        self.banner_generation = 0
         self.scene = QGraphicsScene(self)
         self.map_view = MapView()
         self.map_view.setScene(self.scene)
@@ -182,8 +217,36 @@ class SurveyWindow(QMainWindow):
         self.setCentralWidget(self.map_view)
         self._build_controls()
         self._build_menu()
+        self.scan_banner = QLabel(self)
+        self.scan_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scan_banner.setWordWrap(True)
+        self.scan_banner.hide()
         self.statusBar().showMessage("Open a floor plan or saved survey to begin")
         self.refresh_location()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "scan_banner"):
+            self.scan_banner.setGeometry(0, max(0, (self.height() - 90) // 2), self.width(), 90)
+
+    def show_scan_banner(self, message: str, complete: bool = False) -> None:
+        self.banner_generation += 1
+        generation = self.banner_generation
+        color = "#166534" if complete else "#1e3a8a"
+        self.scan_banner.setStyleSheet(
+            f"background: {color}; color: white; font-size: 18px; font-weight: bold; "
+            "padding: 20px; border-top: 2px solid white; border-bottom: 2px solid white;"
+        )
+        self.scan_banner.setText(message)
+        self.scan_banner.setGeometry(0, max(0, (self.height() - 90) // 2), self.width(), 90)
+        self.scan_banner.show()
+        self.scan_banner.raise_()
+        if complete:
+            QTimer.singleShot(5000, lambda: self.hide_scan_banner(generation))
+
+    def hide_scan_banner(self, generation: int) -> None:
+        if generation == self.banner_generation:
+            self.scan_banner.hide()
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -205,6 +268,7 @@ class SurveyWindow(QMainWindow):
 
     def _build_controls(self) -> None:
         dock = QDockWidget("Survey Controls", self)
+        self.control_dock = dock
         panel = QWidget()
         layout = QVBoxLayout(panel)
         self.location_label = QLabel()
@@ -323,6 +387,10 @@ class SurveyWindow(QMainWindow):
         self.pending_scan = (x, y)
         self.set_controls_enabled(False)
         self.statusBar().showMessage("Scanning Wi-Fi networks…")
+        self.show_scan_banner(
+            "Scanning Wi-Fi networks…\n"
+            "Please stay at this sample location and do not use other controls."
+        )
         worker = ScanWorker()
         worker.signals.succeeded.connect(self.scan_succeeded)
         worker.signals.failed.connect(self.scan_failed)
@@ -331,7 +399,15 @@ class SurveyWindow(QMainWindow):
     def scan_succeeded(self, readings: object) -> None:
         if self.document and self.pending_scan:
             point_id = self.document.add_measurement(*self.pending_scan, readings)
-            self.statusBar().showMessage(f"Captured point {point_id}: {len(readings)} APs")
+            message = (
+                f"Captured point {point_id}: {len(readings)} APs. "
+                "Scan complete — you are now free to walk to the next sample location."
+            )
+            self.statusBar().showMessage(message)
+            self.show_scan_banner(
+                "Scan complete.\nYou are now free to walk to the next sample location.",
+                complete=True,
+            )
         self.pending_scan = None
         self.set_controls_enabled(True)
         self.refresh_filters()
@@ -340,11 +416,13 @@ class SurveyWindow(QMainWindow):
     def scan_failed(self, message: str) -> None:
         self.pending_scan = None
         self.set_controls_enabled(True)
+        self.scan_banner.hide()
         QMessageBox.warning(self, "Scan failed", message)
 
     def set_controls_enabled(self, enabled: bool) -> None:
         self.map_view.setEnabled(enabled)
         self.menuBar().setEnabled(enabled)
+        self.control_dock.setEnabled(enabled)
 
     def apply_calibration(self) -> None:
         if self.document and len(self.document.calibration_points) == 2:
@@ -455,7 +533,7 @@ class SurveyWindow(QMainWindow):
                 self.document.y_max - float(point["y"]),
                 int(point["point_id"]),
             )
-            marker = QGraphicsEllipseItem(x - 1.8, y - 1.8, 3.6, 3.6)
+            marker = SampleMarker(x, y, point_id)
             marker.setBrush(QColor("#2563eb"))
             marker.setPen(QPen(QColor("white"), 0.5))
             marker.setZValue(5)
@@ -469,12 +547,6 @@ class SurveyWindow(QMainWindow):
             )
             marker.setData(0, point_id)
             self.scene.addItem(marker)
-            label = QGraphicsSimpleTextItem(str(point_id))
-            label.setBrush(QColor("white"))
-            label.setScale(0.12)
-            label.setPos(x - 0.7, y - 0.9)
-            label.setZValue(6)
-            self.scene.addItem(label)
 
     def delete_selected_point(self) -> None:
         if not self.document:
