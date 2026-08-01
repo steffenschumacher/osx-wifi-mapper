@@ -9,4 +9,5 @@ build/
 dist/
 *.spec
 !wifi_site_survey.spec
+!native_wifi_mapper.spec
 .DS_Store

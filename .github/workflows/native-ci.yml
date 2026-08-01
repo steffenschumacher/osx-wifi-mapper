@@ -1,0 +1,84 @@
+name: Native PySide6 CI
+
+on:
+  push:
+    branches: [native-pyside6]
+  pull_request:
+    branches: [native-pyside6]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run bandit -c pyproject.toml -r .
+      - run: uv run pytest
+
+  macos-app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --locked
+      - name: Build native app bundle
+        run: uv run pyinstaller --noconfirm --clean native_wifi_mapper.spec
+      - name: Verify metadata and signature
+        run: |
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "dist/WiFi Site Survey Native.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "dist/WiFi Site Survey Native.app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "dist/WiFi Site Survey Native.app"
+      - name: Verify native launch and graceful termination
+        run: |
+          "dist/WiFi Site Survey Native.app/Contents/MacOS/wifi-site-survey-native" &
+          APP_PID=$!
+          trap 'kill -9 "$APP_PID" 2>/dev/null || true' EXIT
+          sleep 5
+          kill -0 "$APP_PID"
+          if lsof -nP -iTCP -sTCP:LISTEN | grep -q wifi-site; then
+            echo "Native application unexpectedly opened a TCP listener"
+            exit 1
+          fi
+          kill -TERM "$APP_PID"
+          for attempt in {1..20}; do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              wait "$APP_PID" || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "Native application did not terminate after SIGTERM"
+          exit 1
+      - name: Package app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/WiFi Site Survey Native.app" \
+            "wifi-site-survey-native-macos-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wifi-site-survey-native-macos-${{ matrix.arch }}
+          path: wifi-site-survey-native-macos-${{ matrix.arch }}.zip

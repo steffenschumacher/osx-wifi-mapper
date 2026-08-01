@@ -62,3 +62,40 @@ def test_scan_worker_reports_success(monkeypatch, qtbot) -> None:
     with qtbot.waitSignal(worker.signals.succeeded, timeout=1000) as signal:
         worker.run()
     assert signal.args == [expected]
+
+
+def test_filters_create_heatmap_and_point_deletion(qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    window.document = document()
+    window.document.meters_per_unit = 1.0
+    reading = {
+        "ssid": "Home",
+        "bssid": "AA",
+        "band": "5 GHz",
+        "rssi_dbm": -55,
+        "channel": 44,
+    }
+    for x, y in ((0, 0), (20, 0), (0, 20), (20, 20), (40, 20)):
+        window.document.add_measurement(x, y, [reading])
+    window.rebuild_scene()
+    window.refresh_filters()
+
+    assert window.ssid_list.count() == 1
+    assert window.bssid_list.count() == 1
+    assert window.band_list.count() == 1
+    assert any(item.data(1) == "heatmap" for item in window.scene.items())
+
+    marker = next(item for item in window.scene.items() if item.data(0) == 1)
+    marker.setSelected(True)
+    window.delete_selected_point()
+    assert all(point["point_id"] != 1 for point in window.document.points)
+
+
+def test_scan_failure_reenables_ui(monkeypatch, qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    window.map_view.setEnabled(False)
+    monkeypatch.setattr("native_wifi_mapper.QMessageBox.warning", lambda *args: None)
+    window.scan_failed("failure")
+    assert window.map_view.isEnabled()

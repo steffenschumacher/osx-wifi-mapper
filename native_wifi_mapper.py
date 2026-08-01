@@ -440,7 +440,7 @@ class SurveyWindow(QMainWindow):
         rgba[..., 1] = np.where(normalized < 0.5, 68, np.where(normalized < 0.7, 204, 197))
         rgba[..., 2] = np.where(normalized < 0.5, 68, np.where(normalized < 0.7, 21, 94))
         rgba[..., 3] = np.where(np.isfinite(surface), round(255 * self.opacity.value() / 100), 0)
-        rgba = np.flipud(rgba)
+        rgba = np.ascontiguousarray(np.flipud(rgba))
         image = QImage(
             rgba.data, rgba.shape[1], rgba.shape[0], rgba.strides[0], QImage.Format.Format_RGBA8888
         ).copy()
