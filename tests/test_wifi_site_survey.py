@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 import types
 
@@ -106,6 +107,38 @@ def test_click_coordinates_support_values_and_heatmap_indices() -> None:
 
     assert app.click_coordinates({"x": 12.5, "y": 7.5}, x_axis, y_axis) == (12.5, 7.5)
     assert app.click_coordinates({"pointNumber": [1, 2]}, x_axis, y_axis) == (100.0, 25.0)
+
+
+def test_complete_survey_file_round_trip() -> None:
+    image_output = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(image_output, format="PNG")
+    rows = sample_rows(2)
+    points = [
+        {"point_id": row["point_id"], "x": row["x"], "y": row["y"], "access_points": 1}
+        for row in rows
+    ]
+
+    saved = app.save_survey(
+        image_output.getvalue(),
+        "office.png",
+        [(2.0, 3.0), (12.0, 3.0)],
+        0.5,
+        points,
+        rows,
+    )
+    restored = app.load_survey(saved)
+
+    assert restored["image_bytes"] == image_output.getvalue()
+    assert restored["image_name"] == "office.png"
+    assert restored["calibration_points"] == [(2.0, 3.0), (12.0, 3.0)]
+    assert restored["meters_per_unit"] == 0.5
+    assert restored["points"] == points
+    assert restored["measurements"] == rows
+
+
+def test_complete_survey_file_rejects_invalid_input() -> None:
+    with pytest.raises(ValueError, match="not a valid"):
+        app.load_survey(b"not a survey")
 
 
 def test_duplicate_coordinates_do_not_inflate_eligibility() -> None:
@@ -235,13 +268,15 @@ def test_build_map_layers_click_surface_heatmap_and_markers() -> None:
     assert figure.data[1].zmin == app.RSSI_MIN
     assert figure.data[1].zmax == app.RSSI_MAX
     assert figure.data[1].opacity == 0.4
-    assert figure.data[2].marker.symbol == "diamond"
+    assert figure.data[2].marker.symbol == "circle"
     assert figure.layout.images[0].sizey == 50
     assert figure.layout.yaxis.range == (0, 50)
     serialized = figure.to_plotly_json()
     assert isinstance(serialized["data"][0]["x"], list)
     assert isinstance(serialized["data"][1]["x"], list)
     assert isinstance(serialized["data"][1]["z"], list)
+    assert isinstance(serialized["data"][2]["x"], list)
+    assert isinstance(serialized["data"][2]["customdata"], list)
 
 
 def test_add_and_delete_measurement_recalculates_eligibility(

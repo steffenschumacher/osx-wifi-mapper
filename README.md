@@ -22,6 +22,11 @@ being treated as weak signals.
 Interpolation is limited to the surveyed area. It visualizes the samples you collected; it does
 not model walls, building materials, interference, or predict RF propagation in unsurveyed rooms.
 
+Use **Save complete survey** to download one `.wifisurvey` file containing the original floor-plan
+image, calibration line and metre scale, measurement points, and every captured Wi-Fi reading.
+Choose **Open saved survey** after starting the app to restore that file and continue surveying.
+The map displays each captured location as a numbered blue point; hover it to inspect its readings.
+
 ## Install from a release
 
 Download the archive for your Mac from the latest GitHub release:

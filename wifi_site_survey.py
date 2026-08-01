@@ -15,9 +15,11 @@ from __future__ import annotations
 import hashlib
 import html
 import io
+import json
 import os
 import platform
 import sys
+import zipfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -63,6 +65,11 @@ LOCATION_STATUS_NAMES = {
     3: "Authorized",
     4: "Authorized while in use",
 }
+SURVEY_FORMAT = "osx-wifi-mapper-survey"
+SURVEY_FORMAT_VERSION = 1
+SURVEY_MANIFEST = "survey.json"
+SURVEY_IMAGE = "floorplan.bin"
+MAX_SURVEY_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
 
 def location_authorization() -> tuple[int | None, Any | None]:
@@ -194,11 +201,112 @@ def initialize_state() -> None:
     st.session_state.setdefault("calibration_points", [])
     st.session_state.setdefault("meters_per_unit", None)
     st.session_state.setdefault("last_map_click", None)
+    st.session_state.setdefault("floorplan_bytes", None)
+    st.session_state.setdefault("floorplan_name", None)
+    st.session_state.setdefault("loaded_survey_hash", None)
 
 
 def quit_application() -> None:
     """Terminate the frozen browser-backed application immediately and reliably."""
     os._exit(0)
+
+
+def _json_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert records containing NumPy/Pandas scalar values into portable JSON values."""
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        record: dict[str, Any] = {}
+        for key, value in row.items():
+            if isinstance(value, np.generic):
+                value = value.item()
+            if isinstance(value, float) and not np.isfinite(value):
+                value = None
+            if value is None or isinstance(value, (str, int, float, bool)):
+                record[key] = value
+            else:
+                record[key] = str(value)
+        records.append(record)
+    return records
+
+
+def save_survey(
+    image_bytes: bytes,
+    image_name: str,
+    calibration_points: list[tuple[float, float]],
+    meters_per_unit: float | None,
+    points: Iterable[dict[str, Any]],
+    measurements: Iterable[dict[str, Any]],
+) -> bytes:
+    """Serialize a complete survey and its original floor plan into one portable file."""
+    manifest = {
+        "format": SURVEY_FORMAT,
+        "version": SURVEY_FORMAT_VERSION,
+        "image_file": SURVEY_IMAGE,
+        "image_name": image_name,
+        "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
+        "calibration_points": [list(map(float, point)) for point in calibration_points],
+        "meters_per_unit": meters_per_unit,
+        "points": _json_records(points),
+        "measurements": _json_records(measurements),
+    }
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(SURVEY_MANIFEST, json.dumps(manifest, separators=(",", ":")))
+        archive.writestr(SURVEY_IMAGE, image_bytes)
+    return output.getvalue()
+
+
+def load_survey(data: bytes) -> dict[str, Any]:
+    """Validate and deserialize a saved survey without extracting files to disk."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = {entry.filename: entry for entry in archive.infolist()}
+            if set(entries) != {SURVEY_MANIFEST, SURVEY_IMAGE}:
+                raise ValueError("Survey archive has unexpected or missing files.")
+            if sum(entry.file_size for entry in entries.values()) > MAX_SURVEY_UNCOMPRESSED_BYTES:
+                raise ValueError("Survey archive is too large.")
+            manifest = json.loads(archive.read(SURVEY_MANIFEST))
+            image_bytes = archive.read(SURVEY_IMAGE)
+    except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("The selected file is not a valid WiFi Site Survey.") from exc
+
+    if not isinstance(manifest, dict):
+        raise ValueError("Survey metadata is invalid.")
+    if manifest.get("format") != SURVEY_FORMAT or manifest.get("version") != SURVEY_FORMAT_VERSION:
+        raise ValueError("Unsupported survey file format or version.")
+    if hashlib.sha256(image_bytes).hexdigest() != manifest.get("image_sha256"):
+        raise ValueError("The floor-plan image in the survey is corrupted.")
+    calibration_points = manifest.get("calibration_points")
+    points = manifest.get("points")
+    measurements = manifest.get("measurements")
+    scale = manifest.get("meters_per_unit")
+    if (
+        not isinstance(calibration_points, list)
+        or len(calibration_points) > 2
+        or any(not isinstance(point, list) or len(point) != 2 for point in calibration_points)
+        or not isinstance(points, list)
+        or not isinstance(measurements, list)
+        or any(not isinstance(point, dict) or "point_id" not in point for point in points)
+        or any(
+            not isinstance(measurement, dict) or not set(MEASUREMENT_COLUMNS).issubset(measurement)
+            for measurement in measurements
+        )
+        or (scale is not None and (not isinstance(scale, (int, float)) or scale <= 0))
+    ):
+        raise ValueError("Survey metadata is invalid.")
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError("The floor-plan image in the survey is invalid.") from exc
+    return {
+        "image_bytes": image_bytes,
+        "image_name": str(manifest.get("image_name") or "floorplan"),
+        "calibration_points": [tuple(map(float, point)) for point in calibration_points],
+        "meters_per_unit": float(scale) if scale is not None else None,
+        "points": points,
+        "measurements": measurements,
+    }
 
 
 def add_measurement_point(x: float, y: float) -> tuple[int, int]:
@@ -605,18 +713,24 @@ def build_map(
         )
 
     if not markers.empty:
+        point_labels = [str(int(point_id)) for point_id in markers["point_id"]]
         figure.add_trace(
             go.Scatter(
-                x=markers["x"],
-                y=markers["y"],
-                mode="markers",
+                # Plain lists avoid Plotly 6 binary arrays, which the embedded event
+                # component does not reliably render.
+                x=markers["x"].astype(float).tolist(),
+                y=markers["y"].astype(float).tolist(),
+                mode="markers+text",
+                text=point_labels,
+                textposition="middle center",
+                textfont={"color": "white", "size": 10},
                 marker={
-                    "size": 14,
-                    "symbol": "diamond",
+                    "size": 20,
+                    "symbol": "circle",
                     "color": "#2563eb",
-                    "line": {"color": "white", "width": 2},
+                    "line": {"color": "#ffffff", "width": 3},
                 },
-                customdata=markers[["point_id", "hover"]],
+                customdata=markers[["point_id", "hover"]].values.tolist(),
                 hovertemplate=(
                     "Point %{customdata[0]}<br>x=%{x:.1f}, y=%{y:.1f}"
                     "<br>%{customdata[1]}<extra></extra>"
@@ -696,15 +810,58 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
             if manager is not None and st.session_state.location_manager is None:
                 st.session_state.location_manager = manager
 
-    uploaded = st.file_uploader("Floor plan", type=["png", "jpg", "jpeg"])
-    if uploaded is None:
-        st.info("Upload a PNG or JPG floor plan to begin.")
-        return
+    saved_survey = st.file_uploader(
+        "Open saved survey", type=["wifisurvey"], key="saved_survey_upload"
+    )
+    if saved_survey is not None:
+        saved_hash = hashlib.sha256(saved_survey.getvalue()).hexdigest()
+        if st.session_state.loaded_survey_hash != saved_hash:
+            try:
+                restored = load_survey(saved_survey.getvalue())
+                st.session_state.floorplan_bytes = restored["image_bytes"]
+                st.session_state.floorplan_name = restored["image_name"]
+                st.session_state.floorplan_hash = hashlib.sha256(
+                    restored["image_bytes"]
+                ).hexdigest()
+                st.session_state.points = restored["points"]
+                st.session_state.measurements = restored["measurements"]
+                st.session_state.next_point_id = (
+                    max((int(point["point_id"]) for point in restored["points"]), default=0) + 1
+                )
+                st.session_state.calibration_points = restored["calibration_points"]
+                st.session_state.meters_per_unit = restored["meters_per_unit"]
+                st.session_state.last_map_click = None
+                st.session_state.loaded_survey_hash = saved_hash
+                st.session_state.map_revision += 1
+                st.success(
+                    f"Loaded {len(restored['points'])} measurement point(s) from the survey."
+                )
+            except ValueError as exc:
+                st.error(str(exc))
 
-    image_bytes = uploaded.getvalue()
-    image_hash = hashlib.sha256(image_bytes).hexdigest()
-    if st.session_state.floorplan_hash != image_hash:
-        st.session_state.floorplan_hash = image_hash
+    if st.session_state.floorplan_bytes is None:
+        uploaded = st.file_uploader("New floor plan", type=["png", "jpg", "jpeg"])
+        if uploaded is None:
+            st.info("Open a saved .wifisurvey file or upload a PNG/JPG floor plan to begin.")
+            return
+        image_bytes = uploaded.getvalue()
+        st.session_state.floorplan_bytes = image_bytes
+        st.session_state.floorplan_name = uploaded.name
+        st.session_state.floorplan_hash = hashlib.sha256(image_bytes).hexdigest()
+        st.session_state.points = []
+        st.session_state.measurements = []
+        st.session_state.next_point_id = 1
+        st.session_state.calibration_points = []
+        st.session_state.meters_per_unit = None
+        st.session_state.last_map_click = None
+        st.session_state.loaded_survey_hash = None
+        st.session_state.map_revision += 1
+
+    image_bytes = st.session_state.floorplan_bytes
+    if st.button("Start a new survey", type="secondary"):
+        st.session_state.floorplan_bytes = None
+        st.session_state.floorplan_name = None
+        st.session_state.floorplan_hash = None
         st.session_state.points = []
         st.session_state.measurements = []
         st.session_state.next_point_id = 1
@@ -712,6 +869,7 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
         st.session_state.meters_per_unit = None
         st.session_state.last_map_click = None
         st.session_state.map_revision += 1
+        st.rerun()
 
     try:
         floorplan = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -875,6 +1033,20 @@ def main() -> None:  # pragma: no cover - Streamlit rerun orchestration
 
     st.subheader("Export")
     export_frame = measurement_frame(st.session_state.measurements)
+    survey_data = save_survey(
+        image_bytes,
+        st.session_state.floorplan_name or "floorplan",
+        st.session_state.calibration_points,
+        st.session_state.meters_per_unit,
+        st.session_state.points,
+        st.session_state.measurements,
+    )
+    st.download_button(
+        "Save complete survey",
+        data=survey_data,
+        file_name="wifi_site_survey.wifisurvey",
+        mime="application/octet-stream",
+    )
     st.download_button(
         "Download survey CSV",
         data=export_frame.to_csv(index=False).encode("utf-8"),
