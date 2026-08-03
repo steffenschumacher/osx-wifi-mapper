@@ -62,6 +62,44 @@ def test_native_loader_accepts_streamlit_v1_survey() -> None:
     assert restored.measurements == rows
 
 
+def test_cross_platform_v1_round_trip_preserves_windows_and_unicode_readings() -> None:
+    document = SurveyDocument(image_bytes(), "plán-办公室.png", [(1.0, 2.0), (21.0, 2.0)], 0.25)
+    expected = [
+        {
+            "ssid": "Café 🛜",
+            "bssid": "AA:BB:CC:DD:EE:01",
+            "band": "2.4 GHz",
+            "rssi_dbm": -61,
+            "channel": 1,
+        },
+        {
+            "ssid": "Office",
+            "bssid": "AA:BB:CC:DD:EE:02",
+            "band": "5 GHz",
+            "rssi_dbm": -52,
+            "channel": 36,
+        },
+        {
+            "ssid": "<hidden>",
+            "bssid": "AA:BB:CC:DD:EE:03",
+            "band": "6 GHz",
+            "rssi_dbm": -70,
+            "channel": 5,
+        },
+    ]
+    document.add_measurement(12.5, 8.75, expected)
+
+    restored = SurveyDocument.from_bytes(document.to_bytes())
+
+    assert restored.image_name == "plán-办公室.png"
+    assert restored.calibration_points == document.calibration_points
+    assert restored.meters_per_unit == 0.25
+    assert [
+        {key: reading[key] for key in ("ssid", "bssid", "band", "rssi_dbm", "channel")}
+        for reading in restored.measurements
+    ] == expected
+
+
 def test_five_metric_points_are_eligible() -> None:
     document = SurveyDocument(image_bytes(), "office.png", meters_per_unit=1.0)
     for x, y in ((0, 0), (5, 0), (0, 5), (5, 5), (10, 5)):
