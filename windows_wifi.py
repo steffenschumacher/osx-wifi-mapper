@@ -34,6 +34,8 @@ WLAN_INTERFACE_STATE_NOT_READY = 0
 # WlanScan completes asynchronously. This bounded fallback allows typical drivers to refresh their
 # cache without blocking Qt's GUI thread because the entire scan runs in a worker.
 SCAN_SETTLE_SECONDS = 4.0
+MAX_WLAN_INTERFACES = 128
+MAX_BSS_ENTRIES = 65_536
 
 
 class GUID(ctypes.Structure):
@@ -130,16 +132,21 @@ def frequency_to_channel(frequency_khz: int) -> tuple[int | None, str]:
 
 
 def parse_bss_entry(entry: WLAN_BSS_ENTRY) -> dict[str, Any]:
-    length = min(int(entry.dot11Ssid.uSSIDLength), len(entry.dot11Ssid.ucSSID))
+    length = int(entry.dot11Ssid.uSSIDLength)
+    if not 0 <= length <= len(entry.dot11Ssid.ucSSID):
+        raise ValueError(f"Invalid DOT11 SSID length: {length}")
     ssid_bytes = bytes(entry.dot11Ssid.ucSSID[:length])
     ssid = ssid_bytes.decode("utf-8", errors="replace") if ssid_bytes else "<hidden>"
     bssid = ":".join(f"{byte:02X}" for byte in entry.dot11Bssid)
     channel, band = frequency_to_channel(int(entry.ulChCenterFrequency))
+    rssi = int(entry.lRssi)
+    if not -127 <= rssi <= 0:
+        raise ValueError(f"Invalid RSSI value: {rssi}")
     return {
         "ssid": ssid,
         "bssid": bssid,
         "band": band,
-        "rssi_dbm": int(entry.lRssi),
+        "rssi_dbm": rssi,
         "channel": channel,
     }
 
@@ -172,6 +179,23 @@ def _check(code: int, operation: str) -> None:
 def _array_from_pointer(pointer: int, count: int, item_type: type[ctypes.Structure], offset: int):
     array_type = item_type * count
     return ctypes.cast(pointer + offset, ctypes.POINTER(array_type)).contents
+
+
+def _validated_count(count: int, maximum: int, description: str) -> int:
+    if not 0 <= count <= maximum:
+        raise RuntimeError(f"Windows returned an invalid {description} count: {count}")
+    return count
+
+
+def _validate_bss_list_size(bss_list: WLAN_BSS_LIST) -> int:
+    count = _validated_count(int(bss_list.dwNumberOfItems), MAX_BSS_ENTRIES, "Wi-Fi entry")
+    required = WLAN_BSS_LIST.wlanBssEntries.offset + count * ctypes.sizeof(WLAN_BSS_ENTRY)
+    if int(bss_list.dwTotalSize) < required:
+        raise RuntimeError(
+            "Windows returned a malformed Wi-Fi entry buffer "
+            f"({int(bss_list.dwTotalSize)} bytes; at least {required} required)."
+        )
+    return count
 
 
 def _configure_api(api: Any) -> None:
@@ -241,9 +265,12 @@ def scan_wifi(
         interface_list = ctypes.cast(
             interface_pointer, ctypes.POINTER(WLAN_INTERFACE_INFO_LIST)
         ).contents
+        interface_count = _validated_count(
+            int(interface_list.dwNumberOfItems), MAX_WLAN_INTERFACES, "Wi-Fi adapter"
+        )
         interfaces = _array_from_pointer(
             interface_pointer.value,
-            int(interface_list.dwNumberOfItems),
+            interface_count,
             WLAN_INTERFACE_INFO,
             WLAN_INTERFACE_INFO_LIST.InterfaceInfo.offset,
         )
@@ -276,13 +303,19 @@ def scan_wifi(
                 if not bss_pointer.value:
                     continue
                 bss_list = ctypes.cast(bss_pointer, ctypes.POINTER(WLAN_BSS_LIST)).contents
+                entry_count = _validate_bss_list_size(bss_list)
                 entries = _array_from_pointer(
                     bss_pointer.value,
-                    int(bss_list.dwNumberOfItems),
+                    entry_count,
                     WLAN_BSS_ENTRY,
                     WLAN_BSS_LIST.wlanBssEntries.offset,
                 )
-                readings.extend(parse_bss_entry(entry) for entry in entries)
+                for entry in entries:
+                    try:
+                        readings.append(parse_bss_entry(entry))
+                    except ValueError:
+                        # A malformed driver entry must not abort otherwise usable observations.
+                        continue
             finally:
                 if bss_pointer.value:
                     api.WlanFreeMemory(bss_pointer)
@@ -291,6 +324,11 @@ def scan_wifi(
             key = (reading["ssid"], reading["bssid"], reading["band"], reading["channel"])
             if key not in strongest or reading["rssi_dbm"] > strongest[key]["rssi_dbm"]:
                 strongest[key] = reading
+        if not strongest:
+            raise RuntimeError(
+                "Windows returned no usable nearby Wi-Fi networks. Confirm Wi-Fi is enabled and "
+                "that Windows itself can display nearby networks. Wait a few seconds and retry."
+            )
         return list(strongest.values())
     finally:
         if interface_pointer.value:

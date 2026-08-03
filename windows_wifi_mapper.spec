@@ -39,6 +39,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
+    version="packaging/windows-version-info.txt",
 )
 diagnostics = Analysis(
     ["wifi_diagnostics.py"],
@@ -78,6 +79,7 @@ diagnostics_exe = EXE(
     upx=False,
     console=True,
     disable_windowed_traceback=False,
+    version="packaging/windows-version-info.txt",
 )
 coll = COLLECT(
     exe,

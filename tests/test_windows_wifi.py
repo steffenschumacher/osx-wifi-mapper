@@ -31,6 +31,7 @@ class FakeWlanApi:
         self.interfaces.InterfaceInfo[0].isState = 1
         self.interfaces.InterfaceInfo[0].strInterfaceDescription = "Test Wi-Fi"
         self.bss = WLAN_BSS_LIST()
+        self.bss.dwTotalSize = ctypes.sizeof(WLAN_BSS_LIST)
         self.bss.dwNumberOfItems = 1
         entry = self.bss.wlanBssEntries[0]
         entry.dot11Ssid.uSSIDLength = 4
@@ -112,9 +113,20 @@ def test_parse_bss_entry_handles_hidden_and_malformed_ssid() -> None:
     assert parse_bss_entry(hidden)["ssid"] == "<hidden>"
 
     malformed = WLAN_BSS_ENTRY()
-    malformed.dot11Ssid.uSSIDLength = 99
-    malformed.dot11Ssid.ucSSID[:] = b"\xff" * 32
+    malformed.dot11Ssid.uSSIDLength = 1
+    malformed.dot11Ssid.ucSSID[0] = 0xFF
     assert "�" in parse_bss_entry(malformed)["ssid"]
+
+    malformed.dot11Ssid.uSSIDLength = 99
+    with pytest.raises(ValueError, match="SSID length"):
+        parse_bss_entry(malformed)
+
+
+def test_parse_bss_entry_rejects_impossible_rssi() -> None:
+    entry = WLAN_BSS_ENTRY()
+    entry.lRssi = 25
+    with pytest.raises(ValueError, match="RSSI"):
+        parse_bss_entry(entry)
 
 
 @pytest.mark.parametrize(
@@ -150,4 +162,30 @@ def test_windows_scanner_reads_and_releases_native_allocations() -> None:
     ]
     assert waits == [windows_wifi.SCAN_SETTLE_SECONDS]
     assert set(api.freed) == {ctypes.addressof(api.interfaces), ctypes.addressof(api.bss)}
+    assert api.closed
+
+
+def test_windows_scanner_rejects_empty_scan_and_releases_allocations() -> None:
+    api = FakeWlanApi()
+    api.bss.dwNumberOfItems = 0
+    api.bss.dwTotalSize = WLAN_BSS_LIST.wlanBssEntries.offset
+    with pytest.raises(RuntimeError, match="no usable nearby"):
+        windows_wifi.scan_wifi(api=api, settle=lambda _: None)
+    assert set(api.freed) == {ctypes.addressof(api.interfaces), ctypes.addressof(api.bss)}
+    assert api.closed
+
+
+def test_windows_scanner_rejects_malformed_bss_buffer() -> None:
+    api = FakeWlanApi()
+    api.bss.dwTotalSize = WLAN_BSS_LIST.wlanBssEntries.offset
+    with pytest.raises(RuntimeError, match="malformed Wi-Fi entry buffer"):
+        windows_wifi.scan_wifi(api=api, settle=lambda _: None)
+    assert api.closed
+
+
+def test_windows_scanner_rejects_unreasonable_interface_count() -> None:
+    api = FakeWlanApi()
+    api.interfaces.dwNumberOfItems = windows_wifi.MAX_WLAN_INTERFACES + 1
+    with pytest.raises(RuntimeError, match="invalid Wi-Fi adapter count"):
+        windows_wifi.scan_wifi(api=api, settle=lambda _: None)
     assert api.closed

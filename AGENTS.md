@@ -39,7 +39,7 @@
 ## Releases
 
 - Synchronize the application version in `pyproject.toml`, `uv.lock`, `native_wifi_mapper.spec`,
-  and the retained legacy `wifi_site_survey.spec`.
+  `packaging/windows-version-info.txt`, and the retained legacy `wifi_site_survey.spec`.
 - Release tags use `vMAJOR.MINOR.PATCH` and trigger `.github/workflows/release.yml`.
 - Releases must build macOS `arm64`, macOS `x86_64`, and Windows `x86_64`. Do not claim Windows
   ARM64 support without a native build and hardware test.

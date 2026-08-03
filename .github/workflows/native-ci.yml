@@ -114,6 +114,12 @@ jobs:
         run: |
           $executable = "extracted/WiFi Site Survey/WiFi Site Survey.exe"
           if (-not (Test-Path $executable)) { throw "Packaged executable is missing" }
+          $version = (Get-Item $executable).VersionInfo
+          if ($version.ProductName -ne "WiFi Site Survey") { throw "Unexpected product name" }
+          if ($version.ProductVersion -ne "0.3.0") { throw "Unexpected product version: $($version.ProductVersion)" }
+          if (-not (Test-Path "extracted/WiFi Site Survey/WiFi Site Survey Diagnostics.exe")) {
+            throw "Packaged diagnostics executable is missing"
+          }
           $process = Start-Process -FilePath $executable -PassThru
           Start-Sleep -Seconds 5
           if ($process.HasExited) { throw "Packaged Windows application exited during startup" }
