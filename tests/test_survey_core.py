@@ -6,7 +6,13 @@ import pytest
 from PIL import Image
 
 import wifi_site_survey as streamlit_app
-from survey_core import SurveyDocument, measurement_frame, triple_eligibility
+from survey_core import (
+    SurveyDocument,
+    contrasting_map_color,
+    measurement_frame,
+    scale_ruler_distance,
+    triple_eligibility,
+)
 
 
 def image_bytes(size: tuple[int, int] = (200, 100)) -> bytes:
@@ -67,3 +73,15 @@ def test_five_metric_points_are_eligible() -> None:
 def test_document_rejects_invalid_archive() -> None:
     with pytest.raises(ValueError, match="not a valid"):
         SurveyDocument.from_bytes(b"invalid")
+
+
+def test_contrast_color_opposes_light_and_dark_floorplans() -> None:
+    assert contrasting_map_color(Image.new("RGB", (20, 20), "white")) == (0, 0, 0)
+    assert contrasting_map_color(Image.new("RGB", (20, 20), "black")) == (255, 255, 255)
+
+
+def test_scale_ruler_uses_readable_one_two_five_distance() -> None:
+    assert scale_ruler_distance(0.5) == (5.0, 10.0)
+    assert scale_ruler_distance(0.02) == pytest.approx((0.2, 10.0))
+    with pytest.raises(ValueError, match="positive"):
+        scale_ruler_distance(0)

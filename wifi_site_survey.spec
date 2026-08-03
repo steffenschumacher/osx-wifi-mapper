@@ -64,7 +64,7 @@ app = BUNDLE(
     name="WiFi Site Survey.app",
     icon=None,
     bundle_identifier="com.steffenschumacher.wifisitesurvey",
-    version="0.2.7",
+    version="0.3.0",
     info_plist={
         "CFBundleDisplayName": "WiFi Site Survey",
         "NSLocationUsageDescription": (

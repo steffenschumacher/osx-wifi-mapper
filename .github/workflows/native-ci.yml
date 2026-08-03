@@ -55,18 +55,18 @@ jobs:
       - name: Package app
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            "dist/WiFi Site Survey Native.app" \
+            "dist/WiFi Site Survey.app" \
             "wifi-site-survey-native-macos-${{ matrix.arch }}.zip"
           mkdir extracted
           ditto -x -k "wifi-site-survey-native-macos-${{ matrix.arch }}.zip" extracted
       - name: Verify final archive metadata and signature
         run: |
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "extracted/WiFi Site Survey Native.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "extracted/WiFi Site Survey Native.app/Contents/Info.plist"
-          codesign --verify --deep --strict --verbose=2 "extracted/WiFi Site Survey Native.app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "extracted/WiFi Site Survey.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "extracted/WiFi Site Survey.app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "extracted/WiFi Site Survey.app"
       - name: Verify final archive launch and graceful termination
         run: |
-          "extracted/WiFi Site Survey Native.app/Contents/MacOS/wifi-site-survey-native" &
+          "extracted/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey-native" &
           APP_PID=$!
           trap 'kill -9 "$APP_PID" 2>/dev/null || true' EXIT
           sleep 5

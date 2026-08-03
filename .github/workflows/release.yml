@@ -28,42 +28,42 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras --locked
-      - name: Build macOS app bundle
-        run: uv run pyinstaller --noconfirm --clean wifi_site_survey.spec
-      - name: Verify app metadata and ad-hoc signature
-        run: |
-          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "dist/WiFi Site Survey.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "dist/WiFi Site Survey.app/Contents/Info.plist"
-          codesign --verify --deep --strict --verbose=2 "dist/WiFi Site Survey.app"
-      - name: Package app and preserve its macOS bundle structure
+      - name: Build native macOS app bundle
+        run: uv run pyinstaller --noconfirm --clean native_wifi_mapper.spec
+      - name: Package native app and preserve its macOS bundle structure
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/WiFi Site Survey.app" \
             "wifi-site-survey-macos-${{ matrix.arch }}.zip"
           shasum -a 256 "wifi-site-survey-macos-${{ matrix.arch }}.zip" > "wifi-site-survey-macos-${{ matrix.arch }}.zip.sha256"
-      - name: Smoke-test the distributed archive
-        env:
-          WIFI_SITE_SURVEY_OPEN_BROWSER: "false"
-          WIFI_SITE_SURVEY_PORT: "18501"
+      - name: Smoke-test the exact distributed native archive
         run: |
           TEST_DIR="$(mktemp -d)"
           ditto -x -k "wifi-site-survey-macos-${{ matrix.arch }}.zip" "$TEST_DIR"
+          /usr/libexec/PlistBuddy -c "Print :NSLocationUsageDescription" "$TEST_DIR/WiFi Site Survey.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$TEST_DIR/WiFi Site Survey.app/Contents/Info.plist"
           codesign --verify --deep --strict --verbose=2 "$TEST_DIR/WiFi Site Survey.app"
-          "$TEST_DIR/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey" &
+          "$TEST_DIR/WiFi Site Survey.app/Contents/MacOS/wifi-site-survey-native" &
           APP_PID=$!
-          trap 'kill "$APP_PID" 2>/dev/null || true; rm -rf "$TEST_DIR"' EXIT
-          for attempt in {1..60}; do
-            if curl --fail --silent "http://127.0.0.1:18501/_stcore/health" >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          curl --fail --silent "http://127.0.0.1:18501/_stcore/health" | grep -q "ok"
-          curl --fail --silent "http://127.0.0.1:18501/" | grep -qi "<html"
-          if lsof -nP -iTCP:3000 -sTCP:LISTEN | grep -q wifi-site; then
-            echo "Packaged app unexpectedly opened Streamlit's development port"
+          trap 'kill -9 "$APP_PID" 2>/dev/null || true; rm -rf "$TEST_DIR"' EXIT
+          sleep 5
+          kill -0 "$APP_PID"
+          if lsof -nP -iTCP -sTCP:LISTEN | grep -q wifi-site; then
+            echo "Native application unexpectedly opened a TCP listener"
             exit 1
           fi
+          kill -TERM "$APP_PID"
+          for attempt in {1..20}; do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              wait "$APP_PID" || true
+              rm -rf "$TEST_DIR"
+              trap - EXIT
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "Native application did not terminate after SIGTERM"
+          exit 1
       - uses: actions/upload-artifact@v7
         with:
           name: wifi-site-survey-macos-${{ matrix.arch }}

@@ -46,12 +46,12 @@ coll = COLLECT(
 )
 app = BUNDLE(
     coll,
-    name="WiFi Site Survey Native.app",
+    name="WiFi Site Survey.app",
     icon=None,
     bundle_identifier="com.steffenschumacher.wifisitesurvey",
     version="0.3.0",
     info_plist={
-        "CFBundleDisplayName": "WiFi Site Survey Native",
+        "CFBundleDisplayName": "WiFi Site Survey",
         "NSLocationUsageDescription": (
             "WiFi Site Survey needs Location Services permission because macOS protects nearby "
             "Wi-Fi network names and access-point addresses as location information."

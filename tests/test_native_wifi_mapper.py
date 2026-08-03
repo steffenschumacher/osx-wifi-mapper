@@ -3,14 +3,27 @@ from __future__ import annotations
 import copy
 import io
 
+import pytest
 from PIL import Image
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QGraphicsLineItem
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QGraphicsLineItem,
+    QGraphicsScene,
+    QPushButton,
+)
 
 from native_wifi_mapper import (
+    PAN_THRESHOLD_PIXELS,
     SAMPLE_MARKER_DIAMETER,
     CalibrationDialog,
     HeatmapWorker,
+    MapView,
     ScanWorker,
+    StartupDialog,
     SurveyWindow,
 )
 from survey_core import SurveyDocument, measurement_frame
@@ -26,9 +39,88 @@ def test_native_window_constructs_and_closes(qtbot) -> None:
     window = SurveyWindow()
     qtbot.addWidget(window)
     window.show()
-    assert window.windowTitle() == "WiFi Site Survey — Native"
+    assert window.windowTitle() == "WiFi Site Survey"
     window.close()
     assert not window.isVisible()
+
+
+@pytest.mark.parametrize(
+    ("choice", "method"), (("survey", "open_survey"), ("floorplan", "open_image"))
+)
+def test_startup_dialog_routes_both_choices(monkeypatch, qtbot, choice, method) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    called = []
+
+    class AcceptedStartup:
+        def __init__(self, parent) -> None:
+            self.choice = choice
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("native_wifi_mapper.StartupDialog", AcceptedStartup)
+    monkeypatch.setattr(window, method, lambda: called.append(method))
+    window.show_startup_dialog()
+    assert called == [method]
+
+
+def test_startup_dialog_exposes_survey_and_floorplan_choices(qtbot) -> None:
+    dialog = StartupDialog()
+    qtbot.addWidget(dialog)
+    labels = {button.text() for button in dialog.findChildren(QPushButton)}
+    assert "Open Existing Survey…" in labels
+    assert "Choose Floor Plan…" in labels
+    dialog.select("survey")
+    assert dialog.choice == "survey"
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_view_menu_zoom_reset_and_crosshair_cursor(qtbot) -> None:
+    window = SurveyWindow()
+    qtbot.addWidget(window)
+    window.document = document()
+    window.document.calibration_points = [(0, 0), (10, 0)]
+    window.document.meters_per_unit = 0.5
+    window.rebuild_scene()
+    baseline = window.map_view.transform().m11()
+    window.map_view.zoom_in()
+    assert window.map_view.transform().m11() > baseline
+    window.map_view.reset_zoom()
+    assert window.map_view.transform().m11() == pytest.approx(baseline)
+    assert window.map_view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    menu_names = {action.text() for action in window.menuBar().actions()}
+    assert "View" in menu_names
+
+
+def test_drag_pans_without_emitting_sample_and_click_does_emit(qtbot) -> None:
+    view = MapView()
+    qtbot.addWidget(view)
+    scene = QGraphicsScene(view)
+    scene.setSceneRect(0, 0, 100, 50)
+    view.setScene(scene)
+    view.set_y_max(50)
+    view.resize(500, 300)
+    view.show()
+    view.fit_map()
+    view.zoom_in()
+    view.zoom_in()
+    samples = []
+    view.map_clicked.connect(lambda x, y: samples.append((x, y)))
+    start = QPoint(250, 150)
+
+    QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(view.viewport(), start + QPoint(PAN_THRESHOLD_PIXELS + 20, 0))
+    QTest.mouseRelease(
+        view.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=start + QPoint(PAN_THRESHOLD_PIXELS + 20, 0),
+    )
+    assert samples == []
+    assert view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+
+    QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    assert len(samples) == 1
 
 
 def test_map_preserves_aspect(qtbot) -> None:
@@ -43,6 +135,10 @@ def test_map_preserves_aspect(qtbot) -> None:
     background = min(window.scene.items(), key=lambda item: item.zValue())
     assert background.pixmap().width() == 200
     assert background.scale() == 0.5
+    ruler_lines = [item for item in window.scene.items() if isinstance(item, QGraphicsLineItem)]
+    assert len(ruler_lines) == 3
+    assert all(item.pen().color() == QColor("black") for item in ruler_lines)
+    assert any(item.data(2) == "scale-ruler" for item in window.scene.items())
 
 
 def test_calibration_dialog_draws_points_and_line_and_accepts(qtbot) -> None:
@@ -249,6 +345,7 @@ def test_numbered_marker_is_visible_and_selectable(qtbot) -> None:
     assert markers[0].flags() & markers[0].GraphicsItemFlag.ItemIsSelectable
     assert "Home / AA / 5 GHz" in markers[0].toolTip()
     assert markers[0].rect().width() == SAMPLE_MARKER_DIAMETER
+    assert markers[0].brush().color() == QColor("black")
     assert not markers[0].number.isVisible()
     markers[0].number.setVisible(True)
     assert markers[0].number.isVisible()

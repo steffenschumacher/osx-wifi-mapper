@@ -31,12 +31,52 @@ MIN_HEATMAP_SAMPLES = 5
 MIN_SAMPLE_DISTANCE_METERS = 1.0
 RSSI_MIN = -90
 RSSI_MAX = -40
+MAP_CONTRAST_CANDIDATES = (
+    (0, 0, 0),
+    (255, 255, 255),
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 128, 255),
+    (255, 255, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+)
 SURVEY_FORMAT = "osx-wifi-mapper-survey"
 SURVEY_FORMAT_VERSION = 1
 SURVEY_MANIFEST = "survey.json"
 SURVEY_IMAGE = "floorplan.bin"
 MAX_SURVEY_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 Triple = tuple[str, str, str]
+
+
+def contrasting_map_color(image: Image.Image) -> tuple[int, int, int]:
+    """Choose a palette color with the greatest average distance from an image."""
+    sample = image.convert("RGB")
+    sample.thumbnail((128, 128))
+    pixels = np.asarray(sample, dtype=float).reshape((-1, 3)) / 255.0
+    candidates = np.asarray(MAP_CONTRAST_CANDIDATES, dtype=float) / 255.0
+    mean_distances = np.linalg.norm(pixels[:, None, :] - candidates[None, :, :], axis=2).mean(
+        axis=0
+    )
+    luminance = pixels @ np.asarray([0.2126, 0.7152, 0.0722])
+    candidate_luminance = candidates @ np.asarray([0.2126, 0.7152, 0.0722])
+    luminance_distance = np.abs(candidate_luminance - luminance.mean())
+    scores = mean_distances + 0.35 * luminance_distance
+    return MAP_CONTRAST_CANDIDATES[int(np.argmax(scores))]
+
+
+def scale_ruler_distance(
+    meters_per_unit: float, target_coordinate_units: float = 15.0
+) -> tuple[float, float]:
+    """Return a readable 1/2/5 scale distance and its map-coordinate length."""
+    if meters_per_unit <= 0 or target_coordinate_units <= 0:
+        raise ValueError("Scale and target ruler length must be positive.")
+    target_meters = meters_per_unit * target_coordinate_units
+    magnitude = 10.0 ** np.floor(np.log10(target_meters))
+    normalized = target_meters / magnitude
+    step = 5.0 if normalized >= 5 else 2.0 if normalized >= 2 else 1.0
+    meters = step * magnitude
+    return float(meters), float(meters / meters_per_unit)
 
 
 def _json_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

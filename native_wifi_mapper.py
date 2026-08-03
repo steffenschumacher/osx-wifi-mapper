@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
     QGraphicsView,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -56,15 +57,18 @@ from survey_core import (
     RSSI_MIN,
     SurveyDocument,
     calibration_scale,
+    contrasting_map_color,
     heatmap_surface,
     measurement_frame,
     point_has_minimum_spacing,
+    scale_ruler_distance,
     select_eligible_triples,
     triple_eligibility,
 )
 
 NATIVE_HEATMAP_RESOLUTION = 755
 SAMPLE_MARKER_DIAMETER = 0.72
+PAN_THRESHOLD_PIXELS = 2
 
 
 class SampleMarker(QGraphicsEllipseItem):
@@ -98,9 +102,12 @@ class MapView(QGraphicsView):
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         self._y_max = 100.0
         self._pan_position: QPoint | None = None
+        self._click_position: QPoint | None = None
+        self._panning = False
 
     def set_y_max(self, value: float) -> None:
         self._y_max = value
@@ -108,7 +115,8 @@ class MapView(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() in {Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton}:
             self._pan_position = event.position().toPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._panning = True
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -120,13 +128,26 @@ class MapView(QGraphicsView):
                 super().mousePressEvent(event)
                 return
             if 0 <= point.x() <= 100 and 0 <= point.y() <= self._y_max:
-                self.map_clicked.emit(point.x(), self._y_max - point.y())
+                self._click_position = event.position().toPoint()
+                self._pan_position = self._click_position
+                self._panning = False
+                event.accept()
                 return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._pan_position is not None:
             position = event.position().toPoint()
+            if (
+                self._click_position is not None
+                and not self._panning
+                and (position - self._click_position).manhattanLength() >= PAN_THRESHOLD_PIXELS
+            ):
+                self._panning = True
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            if not self._panning:
+                event.accept()
+                return
             delta = position - self._pan_position
             self._pan_position = position
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
@@ -137,18 +158,34 @@ class MapView(QGraphicsView):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._pan_position is not None and event.button() in {
+            Qt.MouseButton.LeftButton,
             Qt.MouseButton.MiddleButton,
             Qt.MouseButton.RightButton,
         }:
+            should_sample = event.button() == Qt.MouseButton.LeftButton and not self._panning
+            point = self.mapToScene(event.position().toPoint())
             self._pan_position = None
-            self.unsetCursor()
+            self._click_position = None
+            self._panning = False
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            if should_sample and 0 <= point.x() <= 100 and 0 <= point.y() <= self._y_max:
+                self.map_clicked.emit(point.x(), self._y_max - point.y())
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
-        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        self.scale(factor, factor)
+        self.zoom_in() if event.angleDelta().y() > 0 else self.zoom_out()
+
+    def zoom_in(self) -> None:
+        self.scale(1.25, 1.25)
+
+    def zoom_out(self) -> None:
+        self.scale(0.8, 0.8)
+
+    def reset_zoom(self) -> None:
+        self.resetTransform()
+        self.fit_map()
 
     def fit_map(self) -> None:
         self.fitInView(0, 0, 100, self._y_max, Qt.AspectRatioMode.KeepAspectRatio)
@@ -276,6 +313,40 @@ class CalibrationDialog(QDialog):
             super().accept()
 
 
+class StartupDialog(QDialog):
+    """Prompt for the first stage of a survey when the application opens."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Start WiFi Site Survey")
+        self.setModal(True)
+        self.choice: str | None = None
+        layout = QVBoxLayout(self)
+        title = QLabel("Start a survey")
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        layout.addWidget(title)
+        description = QLabel(
+            "Open a saved survey to continue working, or choose a floor plan to begin a new one."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        buttons = QHBoxLayout()
+        open_survey = QPushButton("Open Existing Survey…")
+        open_survey.clicked.connect(lambda: self.select("survey"))
+        open_floorplan = QPushButton("Choose Floor Plan…")
+        open_floorplan.clicked.connect(lambda: self.select("floorplan"))
+        buttons.addWidget(open_survey)
+        buttons.addWidget(open_floorplan)
+        layout.addLayout(buttons)
+        cancel = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        cancel.rejected.connect(self.reject)
+        layout.addWidget(cancel)
+
+    def select(self, choice: str) -> None:
+        self.choice = choice
+        self.accept()
+
+
 class WorkerSignals(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
@@ -326,7 +397,7 @@ class HeatmapWorker(QRunnable):
 class SurveyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("WiFi Site Survey — Native")
+        self.setWindowTitle("WiFi Site Survey")
         self.resize(1200, 800)
         self.document: SurveyDocument | None = None
         self.pending_scan: tuple[float, float] | None = None
@@ -335,6 +406,7 @@ class SurveyWindow(QMainWindow):
         self.heatmap_generation = 0
         self.heatmap_surface_data: np.ndarray | None = None
         self.banner_generation = 0
+        self.map_color = QColor("#2563eb")
         self.scene = QGraphicsScene(self)
         self.map_view = MapView()
         self.map_view.setScene(self.scene)
@@ -391,6 +463,25 @@ class SurveyWindow(QMainWindow):
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+        view_menu = self.menuBar().addMenu("View")
+        for label, slot, shortcut in (
+            ("Zoom In", self.map_view.zoom_in, "Ctrl++"),
+            ("Zoom Out", self.map_view.zoom_out, "Ctrl+-"),
+            ("Reset Zoom", self.map_view.reset_zoom, "Ctrl+0"),
+        ):
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+            view_menu.addAction(action)
+
+    def show_startup_dialog(self) -> None:
+        dialog = StartupDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.choice == "survey":
+            self.open_survey()
+        elif dialog.choice == "floorplan":
+            self.open_image()
 
     def _build_controls(self) -> None:
         dock = QDockWidget("Survey Controls", self)
@@ -503,7 +594,7 @@ class SurveyWindow(QMainWindow):
 
     def activate_document(self, document: SurveyDocument) -> None:
         self.document = document
-        self.rebuild_scene()
+        self.rebuild_scene(reset_view=True)
         self.refresh_filters()
         self.update_stage_ui()
         self.statusBar().showMessage(
@@ -594,7 +685,7 @@ class SurveyWindow(QMainWindow):
         self.pending_scan = None
         self.set_controls_enabled(True)
         self.refresh_filters()
-        self.rebuild_scene()
+        self.rebuild_scene(reset_view=False)
 
     def scan_failed(self, message: str) -> None:
         self.pending_scan = None
@@ -639,11 +730,14 @@ class SurveyWindow(QMainWindow):
             widget.blockSignals(False)
         self.refresh_heatmap()
 
-    def rebuild_scene(self) -> None:
+    def rebuild_scene(self, *, reset_view: bool = True) -> None:
+        previous_transform = self.map_view.transform()
+        previous_center = self.map_view.mapToScene(self.map_view.viewport().rect().center())
         self.scene.clear()
         if not self.document:
             return
         image = self.document.image
+        self.map_color = QColor(*contrasting_map_color(image))
         rgba = image.convert("RGBA")
         data = rgba.tobytes("raw", "RGBA")
         qimage = QImage(data, rgba.width, rgba.height, QImage.Format.Format_RGBA8888).copy()
@@ -655,29 +749,36 @@ class SurveyWindow(QMainWindow):
         background.setZValue(0)
         self.scene.setSceneRect(0, 0, 100, self.document.y_max)
         self.map_view.set_y_max(self.document.y_max)
-        self.draw_calibration()
+        self.draw_scale_ruler()
         self.draw_markers()
         self.refresh_heatmap()
-        self.map_view.fit_map()
+        if reset_view:
+            self.map_view.reset_zoom()
+        else:
+            self.map_view.setTransform(previous_transform)
+            self.map_view.centerOn(previous_center)
 
-    def draw_calibration(self) -> None:
-        if not self.document:
+    def draw_scale_ruler(self) -> None:
+        if not self.document or not self.document.meters_per_unit:
             return
-        points = [QPointF(x, self.document.y_max - y) for x, y in self.document.calibration_points]
-        if len(points) == 2:
-            line = self.scene.addLine(
-                points[0].x(),
-                points[0].y(),
-                points[1].x(),
-                points[1].y(),
-                QPen(QColor("#7c3aed"), 0.8),
-            )
-            line.setZValue(3)
-        for point in points:
-            marker = self.scene.addEllipse(
-                point.x() - 1, point.y() - 1, 2, 2, QPen(Qt.PenStyle.NoPen), QColor("#7c3aed")
-            )
-            marker.setZValue(4)
+        meters, length = scale_ruler_distance(self.document.meters_per_unit)
+        right, baseline, tick = 98.0, self.document.y_max - 2.0, 1.0
+        left = right - length
+        pen = QPen(self.map_color, 0.55)
+        for x1, y1, x2, y2 in (
+            (left, baseline, right, baseline),
+            (left, baseline - tick, left, baseline + tick),
+            (right, baseline - tick, right, baseline + tick),
+        ):
+            item = self.scene.addLine(x1, y1, x2, y2, pen)
+            item.setZValue(7)
+        label = QGraphicsSimpleTextItem(f"{meters:g} m")
+        label.setBrush(self.map_color)
+        label.setScale(0.16)
+        label.setPos(left, baseline - 2.2)
+        label.setZValue(7)
+        label.setData(2, "scale-ruler")
+        self.scene.addItem(label)
 
     def draw_markers(self) -> None:
         if not self.document:
@@ -693,7 +794,7 @@ class SurveyWindow(QMainWindow):
                 int(point["point_id"]),
             )
             marker = SampleMarker(x, y, point_id)
-            marker.setBrush(QColor("#2563eb"))
+            marker.setBrush(self.map_color)
             marker.setPen(QPen(QColor("white"), 0.5))
             marker.setZValue(5)
             marker.setFlag(marker.GraphicsItemFlag.ItemIsSelectable)
@@ -714,7 +815,7 @@ class SurveyWindow(QMainWindow):
         if ids:
             self.document.delete_point(int(ids[0]))
             self.refresh_filters()
-            self.rebuild_scene()
+            self.rebuild_scene(reset_view=False)
 
     def refresh_heatmap(self) -> None:
         if not self.document:
@@ -775,6 +876,7 @@ def main() -> int:
     application.setApplicationName("WiFi Site Survey")
     window = SurveyWindow()
     window.show()
+    QTimer.singleShot(0, window.show_startup_dialog)
     return application.exec()
 
 
