@@ -31,7 +31,9 @@ ERROR_NDIS_DOT11_POWER_STATE_INVALID = 0x80342002
 WLAN_CLIENT_VERSION_LONGHORN = 2
 DOT11_BSS_TYPE_ANY = 3
 WLAN_INTERFACE_STATE_NOT_READY = 0
-SCAN_SETTLE_SECONDS = 2.0
+# WlanScan completes asynchronously. This bounded fallback allows typical drivers to refresh their
+# cache without blocking Qt's GUI thread because the entire scan runs in a worker.
+SCAN_SETTLE_SECONDS = 4.0
 
 
 class GUID(ctypes.Structure):

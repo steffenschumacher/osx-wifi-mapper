@@ -39,6 +39,8 @@ Windows support is currently available on the `feature/windows-support` developm
 awaiting physical Windows Wi-Fi hardware validation before its first tagged release. See the
 [complete Windows 11 guide](docs/windows.md) for novice-friendly source setup, future release
 installation, checksum verification, Location permission, SmartScreen, and troubleshooting steps.
+Use the separate [Windows hardware validation checklist](docs/windows-hardware-validation.md) when
+testing the beta on a physical laptop.
 
 ### macOS
 
