@@ -27,7 +27,7 @@ jobs:
       - run: uv run bandit -c pyproject.toml -r .
       - run: uv run detect-secrets scan --baseline .secrets.baseline
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
