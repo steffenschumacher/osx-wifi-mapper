@@ -14,23 +14,21 @@
 
 ## Application constraints
 
+- The released UI is the shared, browser-free PySide6 Widgets application. Keep platform-specific
+  scanning behind `wifi_scanner.py`; do not add a browser or local server to the native release.
 - Keep the macOS bundle identifier `com.steffenschumacher.wifisitesurvey` stable. Location Services
   and SSID/BSSID access depend on the bundle's TCC identity.
 - Do not use `sudo` for CoreWLAN scans. SSID/BSSID access requires Location Services permission.
-- The UI is browser-backed Streamlit, but the release is a standard PyInstaller onedir `.app`.
-  Do not switch back to a onefile/windowed bundle; PyInstaller does not recommend that combination
-  on macOS.
-- Bind the server only to loopback, keep Streamlit production mode explicit, and open the browser
-  only after the health endpoint responds.
-- Maintain the single-instance lock and the in-app quit path when changing launcher behavior.
+- Windows scans use the Win32 Native Wi-Fi API, run as the signed-in user, and require Windows
+  precise-location/desktop-app consent. Never request elevation or parse `netsh` output for scans.
+- Native Wi-Fi imports must remain platform-guarded so Linux tests and the other OS can import the
+  shared UI.
+- Keep macOS and Windows releases as PyInstaller onedir artifacts. Do not switch to onefile bundles.
 
 ## Map and data compatibility
 
 - Floor-plan coordinates use an isotropic width-normalized coordinate system. Preserve the source
   image aspect ratio and apply calibration uniformly to both axes.
-- Plotly traces consumed by `streamlit-plotly-events` must receive plain JSON lists. Do not pass
-  NumPy arrays or Pandas Series directly; Plotly 6 binary typed-array serialization is incompatible
-  with the embedded component and can make traces or clicks disappear.
 - Keep SSID, BSSID, and band filters independently optional. Multiple matching triples combine by
   strongest (maximum) interpolated RSSI.
 - A triple needs five two-dimensionally spread sample points at least one metre apart.
@@ -40,11 +38,14 @@
 
 ## Releases
 
-- Synchronize the application version in `pyproject.toml`, `uv.lock`, and
-  `wifi_site_survey.spec`.
+- Synchronize the application version in `pyproject.toml`, `uv.lock`, `native_wifi_mapper.spec`,
+  and the retained legacy `wifi_site_survey.spec`.
 - Release tags use `vMAJOR.MINOR.PATCH` and trigger `.github/workflows/release.yml`.
-- Releases must build both `arm64` and `x86_64` app bundles.
-- The workflow must package with macOS symlinks and permissions intact, then extract, verify, and
-  launch the exact downloadable archive. Keep health, root-HTML, signature, and port-3000 checks.
+- Releases must build macOS `arm64`, macOS `x86_64`, and Windows `x86_64`. Do not claim Windows
+  ARM64 support without a native build and hardware test.
+- Workflows must extract, launch, and terminate the exact downloadable archives and confirm the
+  native apps open no TCP listener. Preserve macOS symlinks, permissions, metadata, and signatures.
+- Do not publish Windows release assets until physical Windows 11 Wi-Fi scanning has been manually
+  verified.
 - Never place a PAT or signing credential in repository files, logs, workflow definitions, or Git
   remotes.

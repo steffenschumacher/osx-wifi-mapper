@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "osx-wifi-mapper"
 version = "0.3.0"
-description = "Native CoreWLAN Wi-Fi site surveys on an interactive floor plan"
+description = "Native macOS and Windows Wi-Fi site surveys on an interactive floor plan"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -25,6 +25,7 @@ dependencies = [
 [project.scripts]
 wifi-site-survey = "wifi_site_survey_launcher:main"
 wifi-site-survey-native = "native_wifi_mapper:main"
+wifi-site-survey-diagnostics = "wifi_diagnostics:main"
 
 [tool.uv]
 required-version = ">=0.11.6"
@@ -46,8 +47,11 @@ py-modules = [
   "macos_wifi",
   "native_wifi_mapper",
   "survey_core",
+  "wifi_scanner",
+  "wifi_diagnostics",
   "wifi_site_survey",
   "wifi_site_survey_launcher",
+  "windows_wifi",
 ]
 
 [tool.pytest.ini_options]

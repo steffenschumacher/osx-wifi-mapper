@@ -2,9 +2,9 @@ name: Native PySide6 CI
 
 on:
   push:
-    branches: [native-pyside6]
+    branches: [main, native-pyside6, feature/windows-support]
   pull_request:
-    branches: [native-pyside6]
+    branches: [main]
 
 permissions:
   contents: read
@@ -90,3 +90,42 @@ jobs:
         with:
           name: wifi-site-survey-native-macos-${{ matrix.arch }}
           path: wifi-site-survey-native-macos-${{ matrix.arch }}.zip
+
+  windows-app:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --locked
+      - run: uv run pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Build native Windows app
+        run: uv run pyinstaller --noconfirm --clean windows_wifi_mapper.spec
+      - name: Package and extract exact Windows archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/WiFi Site Survey" -DestinationPath "wifi-site-survey-native-windows-x86_64.zip"
+          Expand-Archive "wifi-site-survey-native-windows-x86_64.zip" -DestinationPath extracted
+      - name: Verify exact archive launch, no listener, and graceful termination
+        shell: pwsh
+        run: |
+          $executable = "extracted/WiFi Site Survey/WiFi Site Survey.exe"
+          if (-not (Test-Path $executable)) { throw "Packaged executable is missing" }
+          $process = Start-Process -FilePath $executable -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) { throw "Packaged Windows application exited during startup" }
+          $listeners = Get-NetTCPConnection -State Listen -OwningProcess $process.Id -ErrorAction SilentlyContinue
+          if ($listeners) { throw "Native application unexpectedly opened a TCP listener" }
+          Stop-Process -Id $process.Id
+          Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+          if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $process.Id -Force
+            throw "Native application did not terminate normally"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wifi-site-survey-native-windows-x86_64
+          path: wifi-site-survey-native-windows-x86_64.zip

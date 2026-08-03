@@ -46,12 +46,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from macos_wifi import (
-    LOCATION_STATUS_NAMES,
-    location_authorization,
-    request_location_authorization,
-    scan_wifi,
-)
 from survey_core import (
     RSSI_MAX,
     RSSI_MIN,
@@ -65,6 +59,7 @@ from survey_core import (
     select_eligible_triples,
     triple_eligibility,
 )
+from wifi_scanner import privacy_status, request_privacy_access, scan_wifi
 
 NATIVE_HEATMAP_RESOLUTION = 755
 SAMPLE_MARKER_DIAMETER = 0.72
@@ -526,14 +521,13 @@ class SurveyWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def refresh_location(self) -> None:
-        status, manager = location_authorization()
-        self.location_manager = manager
-        self.location_label.setText(f"Location: {LOCATION_STATUS_NAMES.get(status, 'Unavailable')}")
-        self.location_button.setEnabled(status == 0)
+        label, can_request = privacy_status()
+        self.location_label.setText(label)
+        self.location_button.setEnabled(can_request)
 
     def request_location(self) -> None:
-        _, self.location_manager = request_location_authorization()
-        self.statusBar().showMessage("Respond to the macOS prompt, then restart the app")
+        message, self.location_manager = request_privacy_access()
+        self.statusBar().showMessage(message)
 
     def open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

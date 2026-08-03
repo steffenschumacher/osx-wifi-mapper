@@ -1,4 +1,4 @@
-name: Release macOS binaries
+name: Release desktop binaries
 
 on:
   push:
@@ -71,13 +71,53 @@ jobs:
             wifi-site-survey-macos-${{ matrix.arch }}.zip
             wifi-site-survey-macos-${{ matrix.arch }}.zip.sha256
 
+  windows-build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --locked
+      - name: Build native Windows application
+        run: uv run pyinstaller --noconfirm --clean windows_wifi_mapper.spec
+      - name: Package Windows application and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/WiFi Site Survey" -DestinationPath "wifi-site-survey-windows-x86_64.zip"
+          $hash = (Get-FileHash "wifi-site-survey-windows-x86_64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  wifi-site-survey-windows-x86_64.zip" | Set-Content -Encoding ascii "wifi-site-survey-windows-x86_64.zip.sha256"
+          Expand-Archive "wifi-site-survey-windows-x86_64.zip" -DestinationPath extracted
+      - name: Smoke-test exact Windows release archive
+        shell: pwsh
+        run: |
+          $executable = "extracted/WiFi Site Survey/WiFi Site Survey.exe"
+          if (-not (Test-Path $executable)) { throw "Packaged executable is missing" }
+          $process = Start-Process -FilePath $executable -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) { throw "Packaged Windows application exited during startup" }
+          $listeners = Get-NetTCPConnection -State Listen -OwningProcess $process.Id -ErrorAction SilentlyContinue
+          if ($listeners) { throw "Native application unexpectedly opened a TCP listener" }
+          Stop-Process -Id $process.Id
+          Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+          if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $process.Id -Force
+            throw "Native application did not terminate normally"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wifi-site-survey-windows-x86_64
+          path: |
+            wifi-site-survey-windows-x86_64.zip
+            wifi-site-survey-windows-x86_64.zip.sha256
+
   publish:
-    needs: build
+    needs: [build, windows-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: wifi-site-survey-macos-*
+          pattern: wifi-site-survey-*
           merge-multiple: true
           path: release-assets
       - name: Publish GitHub release

@@ -1,9 +1,8 @@
-# macOS Wi-Fi Mapper
+# WiFi Site Survey
 
-An interactive Wi-Fi site-survey tool for macOS. Upload a floor plan, click where
-you are standing, and the app scans every visible access point through Apple's
-native CoreWLAN framework. Measurements can be filtered, visualized, removed,
-and exported as CSV.
+A native Wi-Fi site-survey tool for macOS and Windows 11. Upload a floor plan, click where you are
+standing, and the app scans visible access points through Apple's CoreWLAN or the Windows Native
+Wi-Fi API. Measurements can be filtered, visualized, removed, saved, and exported as CSV.
 
 > **Transparency note:** This project is fully vibe-coded. Its design, implementation, tests, and
 > release automation were developed through iterative collaboration with AI coding agents and
@@ -33,6 +32,15 @@ The map displays each captured location as a contrasting point; hover it to reve
 inspect its readings.
 
 ## Install from a release
+
+### Windows 11
+
+Windows support is currently available on the `feature/windows-support` development branch and is
+awaiting physical Windows Wi-Fi hardware validation before its first tagged release. See the
+[complete Windows 11 guide](docs/windows.md) for novice-friendly source setup, future release
+installation, checksum verification, Location permission, SmartScreen, and troubleshooting steps.
+
+### macOS
 
 Download the archive for your Mac from the latest GitHub release:
 
@@ -87,11 +95,11 @@ uv sync --all-extras --locked
 uv run wifi-site-survey-native
 ```
 
-Live scanning only works on macOS. The UI and automated tests can run on other
-platforms, where scan attempts return a clear error.
+Live scanning works on macOS and Windows 11. The UI and automated tests can run on Linux, where scan
+attempts return a clear unsupported-platform error.
 
 The browser-free Qt Widgets implementation keeps the floor
-plan and overlay layers resident, performs CoreWLAN scans in a worker thread, and reads the same
+plan and overlay layers resident, performs native scans in a worker thread, and reads the same
 version-1 `.wifisurvey` files as the Streamlit application.
 
 The native workflow has two stages. Opening a floor plan first presents a mandatory calibration
@@ -135,16 +143,16 @@ committed `uv.lock`; standard `pip install .` remains supported.
 
 ## Releasing
 
-Push a semantic-version tag to build ad-hoc-signed app bundles for both macOS architectures and
-publish a GitHub release:
+After physical Windows validation, push a semantic-version tag to build Windows x86-64 plus
+ad-hoc-signed macOS app bundles for both macOS architectures and publish a GitHub release:
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The release workflow builds a self-contained app bundle per architecture, packages it while
-preserving macOS symlinks and permissions, and publishes SHA-256 checksums.
+The release workflow builds self-contained native artifacts, tests the exact archives, preserves
+macOS symlinks and permissions, and publishes SHA-256 checksums.
 
 The downloadable builds are ad-hoc signed rather than Apple-notarized, so macOS may quarantine an
 app downloaded through a browser. After extracting it, clear that attribute before the first
