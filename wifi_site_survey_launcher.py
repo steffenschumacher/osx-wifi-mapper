@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import socket
 import sys
@@ -14,6 +13,16 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import IO
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 DEFAULT_PORT = 8501
 HEALTH_PATH = "/_stcore/health"
@@ -43,9 +52,19 @@ def claim_single_instance() -> tuple[IO[str] | None, int | None]:
     """Claim the application lock or return the existing instance's port."""
     lock_file = INSTANCE_LOCK_PATH.open("a+", encoding="utf-8")
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.seek(0)
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write("\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:  # pragma: no cover - every supported CPython platform has one implementation
+            raise RuntimeError("No file-locking implementation is available")
+    except (BlockingIOError, OSError):
+        lock_file.seek(1 if msvcrt is not None else 0)
         value = lock_file.read().strip()
         lock_file.close()
         return None, int(value) if value.isdigit() else DEFAULT_PORT
@@ -54,7 +73,7 @@ def claim_single_instance() -> tuple[IO[str] | None, int | None]:
 
 def record_instance_port(lock_file: IO[str], port: int) -> None:
     """Publish the server port while retaining the process-owned file lock."""
-    lock_file.seek(0)
+    lock_file.seek(1 if msvcrt is not None else 0)
     lock_file.truncate()
     lock_file.write(str(port))
     lock_file.flush()
